@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Resources for the Support Insights Lambda function in the member account
+
+Parameters:
+  LambdaRoleName:
+    Type: String
+    Description: Name of the IAM role for the Lambda function
+  SupportDataBucketName:
+    Type: String
+    Description: Name of the S3 bucket containing support data
+  ResourceBucketName:
+    Type: String
+    Description: Name of the S3 bucket containing the Lambda package in the member account
+
+Resources:
+  SupportInsightsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref LambdaRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: HealthServiceAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - health:DescribeEvents
+                  - health:DescribeEventDetails
+                Resource: '*'
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub 'arn:aws:s3:::${SupportDataBucketName}/*'
+
+  SupportInsightsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SupportInsightsLambdaFunction
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt SupportInsightsLambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref ResourceBucketName
+        S3Key: support-collector-lambda.zip
+      Runtime: python3.11
+      Timeout: 900
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref SupportDataBucketName
+
+  EventBridgeRuleForHistoricalSupportData:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Triggers a one time historical sync of AWS Health Events (180 days) when stack creation is complete"
+      EventPattern:
+        source:
+          - aws.cloudformation
+        detail-type:
+          - CloudFormation Stack Status Change
+        resources:
+          - !Ref AWS::StackId
+        detail:
+          stack-id:
+            - !Ref AWS::StackId
+          status-details:
+            status:
+            - CREATE_COMPLETE
+      Targets:
+        - Arn: !GetAtt SupportInsightsLambdaFunction.Arn
+          Id: "SupportInsightsLambdaFunction"
+          Input: !Sub '{"past_no_of_days": 180, "bucket_name": "${SupportDataBucketName}"}'
+
+  EventBridgeRuleForDailyRun:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: EventBridgeRuleForDailyRun
+      Description: "Daily collection of AWS Health Events at 7 AM UTC"
+      ScheduleExpression: "cron(0 7 ? * * *)"
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt SupportInsightsLambdaFunction.Arn
+        Input: !Sub '{"past_no_of_days": 1, "bucket_name": "${SupportDataBucketName}"}'
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SchedulerLambdaInvocationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SupportInsightsLambdaFunction.Arn
+
+  LambdaPermissionForHistoricalSupportDataRule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SupportInsightsLambdaFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleForHistoricalSupportData.Arn
+      Action: lambda:InvokeFunction
+
+  LambdaPermissionForDailyRunRule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SupportInsightsLambdaFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleForDailyRun.Arn
+      Action: lambda:InvokeFunction
+
+Outputs:
+  LambdaExecutionRoleArn:
+    Description: ARN of the IAM role for the Lambda function
+    Value: !GetAtt SupportInsightsLambdaExecutionRole.Arn
+  SupportInsightsLambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt SupportInsightsLambdaFunction.Arn

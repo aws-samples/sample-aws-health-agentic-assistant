@@ -1,0 +1,82 @@
+{
+  "TableName": "chaplin-health-events",
+  "AttributeDefinitions": [
+    {"AttributeName": "healthkey", "AttributeType": "S"},
+    {"AttributeName": "service", "AttributeType": "S"},
+    {"AttributeName": "event_type", "AttributeType": "S"},
+    {"AttributeName": "region", "AttributeType": "S"},
+    {"AttributeName": "start_time", "AttributeType": "S"},
+    {"AttributeName": "eventCategory", "AttributeType": "S"},
+    {"AttributeName": "status_code", "AttributeType": "S"},
+    {"AttributeName": "tag", "AttributeType": "S"},
+    {"AttributeName": "label", "AttributeType": "S"}
+  ],
+  "KeySchema": [
+    {"AttributeName": "healthkey", "KeyType": "HASH"}
+  ],
+  "ProvisionedThroughput": {
+    "ReadCapacityUnits": 1000,
+    "WriteCapacityUnits": 500
+  },
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "ServiceIndex",
+      "KeySchema": [
+        {"AttributeName": "service", "KeyType": "HASH"},
+        {"AttributeName": "start_time", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 500, "WriteCapacityUnits": 100}
+    },
+    {
+      "IndexName": "EventTypeIndex",
+      "KeySchema": [
+        {"AttributeName": "event_type", "KeyType": "HASH"},
+        {"AttributeName": "start_time", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 300, "WriteCapacityUnits": 50}
+    },
+    {
+      "IndexName": "RegionIndex",
+      "KeySchema": [
+        {"AttributeName": "region", "KeyType": "HASH"},
+        {"AttributeName": "start_time", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 200, "WriteCapacityUnits": 50}
+    },
+    {
+      "IndexName": "CategoryStatusIndex",
+      "KeySchema": [
+        {"AttributeName": "eventCategory", "KeyType": "HASH"},
+        {"AttributeName": "status_code", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 200, "WriteCapacityUnits": 50}
+    },
+    {
+      "IndexName": "TagIndex",
+      "KeySchema": [
+        {"AttributeName": "tag", "KeyType": "HASH"},
+        {"AttributeName": "start_time", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 150, "WriteCapacityUnits": 25}
+    },
+    {
+      "IndexName": "LabelIndex",
+      "KeySchema": [
+        {"AttributeName": "label", "KeyType": "HASH"},
+        {"AttributeName": "start_time", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"},
+      "ProvisionedThroughput": {"ReadCapacityUnits": 150, "WriteCapacityUnits": 25}
+    }
+  ],
+  "BillingMode": "PROVISIONED",
+  "SSESpecification": {
+    "Enabled": true,
+    "SSEType": "KMS"
+  }
+}

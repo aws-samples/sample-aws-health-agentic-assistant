@@ -1,0 +1,28 @@
+{
+  "name": "aws-health-dashboard",
+  "version": "1.0.0",
+  "description": "AWS Health Event Intelligence Dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "nodemon server.js",
+    "client": "cd client && npm start",
+    "build": "cd client && npm run build",
+    "install-client": "cd client && npm install"
+  },
+  "dependencies": {
+    "amazon-cognito-identity-js": "^6.3.16",
+    "aws-sdk": "^2.1692.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-session": "^1.18.2",
+    "path": "^0.12.7",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "nodemon": "^3.0.1"
+  }
+}

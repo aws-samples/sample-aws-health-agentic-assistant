@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Chaplin Infrastructure - Cognito User Pool, DynamoDB Table, and S3-to-DynamoDB Lambda'
+
+Parameters:
+  HealthDataBucketName:
+    Type: String
+    Description: Name of the existing S3 bucket containing health event data
+
+Resources:
+  # Cognito User Pool
+  ChaplinUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: chaplin-user-pool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+
+  ChaplinUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: chaplin-client
+      UserPoolId: !Ref ChaplinUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: minutes
+        IdToken: minutes
+
+  # DynamoDB Table
+  ChaplinHealthEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: chaplin-health-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: healthkey
+          AttributeType: S
+        - AttributeName: status_code
+          AttributeType: S
+        - AttributeName: start_time
+          AttributeType: S
+      KeySchema:
+        - AttributeName: healthkey
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status_code-index
+          KeySchema:
+            - AttributeName: status_code
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Application
+          Value: Chaplin
+        - Key: Purpose
+          Value: HealthEventsStorage
+
+  # Lambda IAM Role
+  S3ToDynamoDBLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: chaplin-s3-to-dynamodb-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${HealthDataBucketName}'
+                  - !Sub 'arn:aws:s3:::${HealthDataBucketName}/*'
+        - PolicyName: DynamoDBWriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt ChaplinHealthEventsTable.Arn
+
+  # Lambda Function
+  S3ToDynamoDBFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: chaplin-s3-to-dynamodb
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt S3ToDynamoDBLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ChaplinHealthEventsTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+          
+          def lambda_handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              for record in event['Records']:
+                  bucket = record['s3']['bucket']['name']
+                  key = record['s3']['object']['key']
+                  
+                  if not key.endswith('.json'):
+                      print(f"Skipping non-JSON file: {key}")
+                      continue
+                  
+                  try:
+                      response = s3.get_object(Bucket=bucket, Key=key)
+                      data = json.loads(response['Body'].read().decode('utf-8'))
+                      
+                      # Handle both formats:
+                      # 1. Array format: {"events": [...]}
+                      # 2. Single event format from upload_health.py
+                      events = []
+                      if 'events' in data:
+                          events = data['events']
+                      elif 'arn' in data:
+                          # Single event file from data pipeline
+                          events = [data]
+                      else:
+                          print(f"Unknown format in {key}")
+                          continue
+                      
+                      print(f"Processing {len(events)} events from {key}")
+                      
+                      with table.batch_writer() as batch:
+                          for event_data in events:
+                              item = {
+                                  'healthkey': event_data.get('arn', ''),
+                                  'status_code': event_data.get('statusCode', 'unknown'),
+                                  'start_time': str(event_data.get('startTime', '')),
+                                  'service': event_data.get('service', ''),
+                                  'event_type_code': event_data.get('eventTypeCode', ''),
+                                  'event_type_category': event_data.get('eventTypeCategory', ''),
+                                  'region': event_data.get('region', ''),
+                                  'end_time': str(event_data.get('endTime', '')),
+                                  'last_updated_time': str(event_data.get('lastUpdatedTime', '')),
+                                  'event_scope_code': event_data.get('eventScopeCode', ''),
+                                  'details': event_data.get('details', ''),
+                                  'raw_data': json.dumps(event_data)
+                              }
+                              batch.put_item(Item=item)
+                      
+                      print(f"Successfully loaded {len(events)} events to DynamoDB")
+                      
+                  except Exception as e:
+                      print(f"Error processing {key}: {str(e)}")
+                      raise
+              
+              return {'statusCode': 200, 'body': 'Success'}
+
+  # Lambda Permission for S3
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref S3ToDynamoDBFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${HealthDataBucketName}'
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref ChaplinUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt ChaplinUserPool.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolArn'
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref ChaplinUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-ClientId'
+
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref ChaplinHealthEventsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  DynamoDBTableArn:
+    Description: DynamoDB Table ARN
+    Value: !GetAtt ChaplinHealthEventsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TableArn'
+
+  S3ToDynamoDBLambdaArn:
+    Description: S3 to DynamoDB Lambda Function ARN
+    Value: !GetAtt S3ToDynamoDBFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  LambdaRoleArn:
+    Description: Lambda Execution Role ARN
+    Value: !GetAtt S3ToDynamoDBLambdaRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRoleArn'

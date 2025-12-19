@@ -1,0 +1,24 @@
+# Suppress false positive for generic-api-key in output cache files
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-maintenance-updates-cache.json:generic-api-key:121147
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-accountNotification-cache.json:generic-api-key:147823
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-operational-notifications-cache.json:generic-api-key:56613
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:131272
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:288278
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:347797
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:115865
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-accountNotification-cache.json:generic-api-key:45119
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:107009
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:109908
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:408226
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:192250
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:388470
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-operational-notifications-cache.json:generic-api-key:68358
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-accountNotification-cache.json:generic-api-key:117232
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:353609
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:433459
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:108508
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-security-compliance-cache.json:generic-api-key:5096
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-accountNotification-cache.json:generic-api-key:25787
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-category-scheduledChange-cache.json:generic-api-key:43693
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-migration-requirements-cache.json:generic-api-key:288863
+fc659929af2724473e62a0d97f8ad52adec2e627:output/event-type-maintenance-updates-cache.json:generic-api-key:55973

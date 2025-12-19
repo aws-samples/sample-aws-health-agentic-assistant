@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DynamoDB table for Chaplin Health Events with AWS-managed KMS encryption
+
+Parameters:
+  TableName:
+    Type: String
+    Default: chaplin-health-events
+    Description: Name of the DynamoDB table
+
+Resources:
+  HealthEventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PROVISIONED
+      
+      # AWS-Managed KMS Encryption
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      
+      # Point-in-Time Recovery for data protection
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      
+      # Table Schema
+      AttributeDefinitions:
+        - AttributeName: healthkey
+          AttributeType: S
+        - AttributeName: service
+          AttributeType: S
+        - AttributeName: event_type
+          AttributeType: S
+        - AttributeName: region
+          AttributeType: S
+        - AttributeName: start_time
+          AttributeType: S
+        - AttributeName: eventCategory
+          AttributeType: S
+        - AttributeName: status_code
+          AttributeType: S
+        - AttributeName: tag
+          AttributeType: S
+        - AttributeName: label
+          AttributeType: S
+      
+      KeySchema:
+        - AttributeName: healthkey
+          KeyType: HASH
+      
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1000
+        WriteCapacityUnits: 500
+      
+      # Global Secondary Indexes
+      GlobalSecondaryIndexes:
+        - IndexName: ServiceIndex
+          KeySchema:
+            - AttributeName: service
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 500
+            WriteCapacityUnits: 100
+        
+        - IndexName: EventTypeIndex
+          KeySchema:
+            - AttributeName: event_type
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 300
+            WriteCapacityUnits: 50
+        
+        - IndexName: RegionIndex
+          KeySchema:
+            - AttributeName: region
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 200
+            WriteCapacityUnits: 50
+        
+        - IndexName: CategoryStatusIndex
+          KeySchema:
+            - AttributeName: eventCategory
+              KeyType: HASH
+            - AttributeName: status_code
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 200
+            WriteCapacityUnits: 50
+        
+        - IndexName: TagIndex
+          KeySchema:
+            - AttributeName: tag
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 150
+            WriteCapacityUnits: 25
+        
+        - IndexName: LabelIndex
+          KeySchema:
+            - AttributeName: label
+              KeyType: HASH
+            - AttributeName: start_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 150
+            WriteCapacityUnits: 25
+      
+      # Tags for resource management
+      Tags:
+        - Key: Application
+          Value: Chaplin
+        - Key: Component
+          Value: HealthEvents
+        - Key: Environment
+          Value: Production
+        - Key: DataClassification
+          Value: Sensitive
+        - Key: Encryption
+          Value: AWS-Managed-KMS
+
+Outputs:
+  TableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref HealthEventsTable
+    Export:
+      Name: ChaplinHealthEventsTableName
+  
+  TableArn:
+    Description: ARN of the DynamoDB table
+    Value: !GetAtt HealthEventsTable.Arn
+    Export:
+      Name: ChaplinHealthEventsTableArn
+  
+  EncryptionType:
+    Description: Encryption type used
+    Value: AWS-Managed KMS
+  
+  PointInTimeRecoveryEnabled:
+    Description: PITR status
+    Value: true

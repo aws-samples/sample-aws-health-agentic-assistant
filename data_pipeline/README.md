@@ -1,0 +1,284 @@
+# AWS Health Events Data Pipeline
+
+## Why You Need This
+
+Chaplin's AI agents analyze AWS Health Events to provide actionable insights, recommendations and perform remediation actions. However, Chaplin cannot function without health event data. This data pipeline module collects AWS Health Events from your designated AWS accounts and centralizes them in an S3 bucket, which then feeds into Chaplin's analysis engine. Without this pipeline, Chaplin would have no data to analyze.
+
+**What it does**: Automatically collects AWS Health Events (service notifications, maintenance windows, security advisories, etc.) from single or multiple AWS accounts and stores them in a central S3 bucket for Chaplin's AI agents to process.
+
+## Overview
+
+This repository contains scripts and resources to automate the deployment of AWS Lambda functions in designated member accounts. The deployed resources collect and upload AWS Health Events to an existing Amazon S3 bucket in the Data Collection Central account. The collected data is then utilized by Chaplin to analyze and gain insights into your service health events.
+
+## Prerequisites
+
+- An AWS account for resources with the necessary permissions to create and manage resources (IAM roles, Lambda functions, CloudFormation stacks, etc.).
+- It is recommended to utilize AWS CloudShell, as it comes pre-installed with the required libraries and tools. Alternatively, you can use a local machine with the AWS CLI installed and configured with valid credentials.
+- An Amazon S3 bucket for data collection in Management account
+- An Amazon S3 bucket for resources for infrastructure deployment in Management account
+
+## Deployment dependencies
+
+If you use your local machine to deploy the solution, the following dependencies will be required for deploying the Lambda:
+
+```text
+boto3==1.34.146
+```
+
+## Lambda Function Configuration
+
+The default Lambda function configuration is set to:
+
+- Memory: 128MB
+- Ephemeral storage: 512MB
+
+However, it is recommended to update these settings based on the volume of data you expect to collect. You can modify the Lambda function configuration in the `member_account_resources.yaml`
+
+## Directory Structure
+
+```bash
+├── deploy_collector.sh
+├── deploy_infrastructure.py
+├── deploy_stackset.py
+├── individual-account-deployments
+│   ├── deploy_collector_lambda_member.sh
+│   ├── deploy_lambda_function.py
+│   └── member_account_resources.yaml
+├── member_account_resources.yaml
+└── support-collector-lambda
+    ├── health_client.py
+    ├── lambda_function.py
+    ├── region_lookup.py
+    ├── ta_checks_info.json
+    ├── upload_cases.py
+    ├── upload_health.py
+    └── upload_ta.py
+```
+
+## Deployment Options
+
+You have two options for deploying the necessary resources:
+
+### Option 1: Using AWS Organizations - Bulk Deployment via StackSet
+
+Use this option if you have AWS Organizations set up. You can leverage AWS CloudFormation StackSets across multiple linked or member accounts with a single operation. AWS Organizations integrates with CloudFormation, enabling centralized management as you scale across multiple accounts. It will setup the Lambda function and EventBridge in all the AWS accounts that belong to the AWS Organization units provided by the user.
+
+To deploy this solution, you will need to know the `<organization-id>`, `<root-id>`, and `<ou-id>` values for your environment. Refer to the AWS Organizations user guide: [viewing details of an Organization](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_org_details.html#orgs_view_ou). Note that the organization ID starts with the prefix o-, the root ID starts with r-, and the OU ID starts with ou- (e.g., o-xxxxx/r-xxxxx/ou-xxxxx).
+
+#### Deployment Steps using AWS Organization
+
+1. In the Data Collection Central account, launch AWS CloudShell or open a terminal window on your local machine.
+2. Clone the repository:
+
+    ```bash
+    git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
+    ```
+
+3. Navigate to the `data_pipeline` directory:
+
+    ```bash
+    cd sample-aws-health-agentic-assistant/data_pipeline
+    ```
+
+4. Run the `deploy_collector.sh` script:
+
+    ```bash
+    chmod +x deploy_collector.sh 
+    ./deploy_collector.sh
+    ```
+
+    The script will prompt you for the following inputs:
+
+    - Enter the OU IDs separated by commas (e.g., `ou-xxxxxxxxxx, ou-xxxxxxxxxx`): this will deploy a stack in each of the selected OU
+    - Enter the data collection S3 bucket name (here in the management account)
+
+5. The script will perform the following tasks:
+
+   - Create a CloudFormation StackSet to deploy necessary resources (IAM roles, Lambda functions, etc.) in member accounts.
+   - Set up an Amazon EventBridge scheduler to periodically trigger the AWS Lambda function.
+   - Generate a JSON file for the bucket policy that you can use to update the Data Collector S3 Bucket (in file `output_bucket_policy.json`)
+   - Update the bucket policy for the support data bucket to allow member accounts to upload their support data.
+   - Deploy a stackset to run a one time sync to fetch historical support data and load to S3 data bucket.
+
+The bucket policy for the support data is generated in the file `output_bucket_policy.json` and the script will ask you if you want to overwrite the bucket policy. If you decline, then you will have to update it manually. The policy is similar to the following one:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": [
+                    "arn:aws:iam::111122223333:role/SupportInsightsLambdaRole-9c8794ee-f9e8",
+                    "arn:aws:iam::444455556666:role/SupportInsightsLambdaRole-9c8794ee-f9e8",
+                    "arn:aws:iam::777788889999:role/SupportInsightsLambdaRole-9c8794ee-f9e8"
+                ]
+            },
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": "arn:aws:s3:::DATA-COLLECTOR_BUCKET/*",
+            "Condition": {
+                "ForAnyValue:StringLike": {
+                    "aws:PrincipalOrgPaths": [
+                        "<organization-id>/<root-id>/<ou-id1>/*",
+                        "<organization-id>/<root-id>/<ou-id2>/*"
+                    ]
+                }
+            }
+        }
+    ]
+}
+```
+
+### Option 2: Manual Deployment in Each Account via CloudFormation
+
+Use this option if you do not wish to use AWS Organizations and want to target a few accounts.
+
+#### Deployment Steps for a single account
+
+1. In the member account, launch AWS CloudShell or open a terminal window on your local machine.
+2. Clone the repository:
+
+    ```bash
+    git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
+    ```
+
+3. Navigate to the `individual-account-deployments` directory:
+
+    ```bash
+    cd sample-aws-health-agentic-assistant/data_pipeline/individual-account-deployments
+    ```
+
+4. Run the `deploy_collector_lambda_member.sh` script:
+
+    ```bash
+    chmod +x deploy_collector_lambda_member.sh
+    ./deploy_collector_lambda_member.sh
+    ```
+
+5. The script will prompt you to provide the input bucket name to store the support data. It is preferred to store all the data in the same account though you can select a bucket in another account and update its policy (see next section).
+6. The script will perform the following tasks:
+   - Create an IAM role `SupportInsightsLambdaRole-9c8794ee-f9e8` with the necessary permissions to access the AWS Support and Health services.
+   - Deploy the Lambda function with the created IAM role, using a CloudFormation stack.
+   - Set up an Amazon EventBridge scheduler to periodically trigger the AWS Lambda function.
+   - Set up an Amazon EventBridge scheduler to run a one time sync to fetch historical support data and load to S3 data bucket.
+
+#### Bucket Policy
+
+If you want to store the data in a central bucket, you need to update the bucket policy of the S3 bucket to grant access to the specific member accounts. Replace the placeholders in the following bucket policy with your specific values:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<member_account_id>:role/SupportInsightsLambdaRole-9c8794ee-f9e8"
+      },
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:PutObjectAcl"
+      ],
+      "Resource": "arn:aws:s3:::<your-bucket-name>/*"
+    }
+  ]
+}
+```
+
+Replace `<member_account_id>` with the actual AWS account ID of the member account, and `<your-bucket-name>` with the name of the S3 bucket in the Data Collection Central account. You can add multiple accounts. Please note 'SupportInsightsLambdaRole-9c8794ee-f9e' is going to be the name of the role created in the member accounts to grant permission to Lambda function.
+
+## Data Collection Process
+
+After the successful deployment, an Amazon EventBridge scheduler will periodically trigger the AWS Lambda function. The Lambda function will collect and store AWS Health Events in the specified S3 bucket.
+
+- The initial execution of the Lambda function will collect and store up to 180 days of historical health events. You can modify the number of days by updating the `past_no_of_days` parameter in the `EventBridgeRuleForHistoricalSupportData` resource in the `member_account_resources.yaml` CloudFormation template.
+- Subsequent executions will collect and store health events for the previous day.
+- The Lambda function runs daily at 7 AM UTC to collect the previous day's health events.
+
+The user does not need to manually trigger the Lambda function, as the data collection process is automated and managed by the deployed resources.
+
+## Optional - Testing the Lambda Function
+
+You can test the Lambda function by invoking it with a custom payload. The payload should be a JSON object with the following properties:
+
+- `past_no_of_days` (integer): The number of past days for which you want to retrieve health events.
+- `bucket_name` (string): The name of the S3 bucket where the health events will be stored.
+
+Example payload:
+
+```json
+{
+  "past_no_of_days": 7,
+  "bucket_name": "<DATA-COLLECTION-BUCKET>"
+}
+```
+
+In this example, the Lambda function will retrieve health events for the past 7 days. The data will be stored in the `<DATA-COLLECTION-BUCKET>` S3 bucket.
+
+To test the Lambda function:
+
+1. Navigate to the AWS Lambda console.
+2. Select the Lambda function you want to test.
+3. Click the "Test" button.
+4. Under "Configure test event", choose "Create new event".
+5. Enter an event name (e.g., "TestEvent").
+6. Replace the default JSON payload with the desired payload (e.g., the example payload above).
+7. Click "Create".
+8. Click "Test" to invoke the Lambda function with the provided payload.
+
+The Lambda function will execute, and you can review the output and logs in the "Execution result" section.
+
+Note: Make sure to replace `<DATA-COLLECTION-BUCKET>` with the actual name of your S3 bucket.
+
+## Cleanup
+
+To clean up the deployed resources, follow these steps:
+
+1. Delete the CloudFormation StackSets (for option 1) in the following order:
+   - Navigate to the CloudFormation console in the management account.
+   - Select the StackSet named `support-insights-historical-data*` and delete the stackset instances.
+   - Delete the StackSet.
+   - Select the StackSet named `support-insights-stackset*` and delete the stackset instances.
+   - Delete the StackSet.
+
+   Alternatively, you can use the CLI commands as below:
+   - Delete the Stack instances (replace the placeholders):
+
+   ```bash
+   # Delete stack set instances:
+   aws cloudformation delete-stack-instances --stack-set-name support-insights-historical-data-<time-stamp> --deployment-targets OrganizationalUnitIds=<ou ids> --regions us-west-2 --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 --no-retain-stacks
+   
+   # Delete the StackSet:
+   aws cloudformation delete-stack-set --stack-set-name support-insights-historical-data-<time-stamp>
+
+   # Delete stack set instances:
+   aws cloudformation delete-stack-instances --stack-set-name support-insights-<time-stamp> --deployment-targets OrganizationalUnitIds=<ou ids> --regions us-west-2 --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 --no-retain-stacks
+   
+   # Delete the StackSet:
+   aws cloudformation delete-stack-set --stack-set-name support-insights-stackset-<time-stamp>
+   ```
+
+2. Delete the member account CloudFormation stack (for option 2):
+   - Navigate to the CloudFormation console in the member account.
+   - Select the stack named `SupportInsightsLambdaStack`.
+   - Delete the stack.
+
+   Alternatively, you can use the CLI command:
+
+   ```bash
+   aws cloudformation delete-stack --stack-name SupportInsightsLambdaStack
+   ```
+
+    > **Warning:** Before proceeding with the next step, ensure that no critical data is present in the S3 bucket containing the support data. Deleting the S3 bucket will permanently remove all data stored in it.
+
+3. Empty and delete the S3 bucket containing the support data.
+
+## Disclaimer
+
+The sample code provided in this solution is for educational purposes only. Users should thoroughly test and validate the solution before deploying it in a production environment.
