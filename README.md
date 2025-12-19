@@ -21,7 +21,7 @@ Unlike traditional business intelligence dashboards with predefined schemas, Cha
 ![Architecture Diagram](img/architecture.png)
 
 ### Technology Stack
-- **AI Framework**: Amazon Strands with Bedrock Claude 3.5 Sonnet
+- **AI Framework**: Strands Agents (an open-source framework developed by AWS) with Bedrock Claude Sonnet 4 (supports any LLM through Strands framework)
 - **Backend**: Python 3.8+ with specialized agent architecture
 - **Frontend**: React.js with real-time WebSocket streaming
 - **Server**: Node.js/Express with WebSocket support
