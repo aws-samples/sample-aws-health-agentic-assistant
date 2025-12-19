@@ -3,7 +3,7 @@
 ## Overview
 
 ### Problem Statement
-Organizations struggle with reactive AWS health event management using static dashboards and manual processes. They usually rely on TAMs for health event interpretation and impact analysis, creating bottlenecks and delays in critical decision-making. AWS Support needs to provide a proactive, conversational AWS health analytics platform that transforms how customers understand and respond to service changes, maintenance windows, and operational impacts through self-service capabilities.
+Organizations struggle with reactive AWS health event management using static dashboards and manual processes. They often rely on AWS Support for health event interpretation and impact analysis, creating bottlenecks and delays in critical decision-making. They need a proactive, conversational AWS health analytics platform that transforms how customers understand and respond to service changes, maintenance windows, and operational impacts through self-service capabilities.
 
 ### Chaplin Overview
 Unlike traditional business intelligence dashboards with predefined schemas, Chaplin enables dynamic, on-demand report generation through natural language queries powered by agentic AI. Users can ask questions in plain english and receive contextualized insights instantly, eliminating the constraints of static dashboards. This enables customers to proactively take actions on their health events, reducing dependencies on AWS Support or TAMs for routine health event analysis and planning.
