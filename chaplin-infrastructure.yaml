@@ -92,7 +92,6 @@ Resources:
   S3ToDynamoDBLambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: chaplin-s3-to-dynamodb-lambda-role
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -180,17 +179,49 @@ Resources:
                       
                       with table.batch_writer() as batch:
                           for event_data in events:
+                              # Extract event type for frontend compatibility
+                              event_type_code = event_data.get('eventTypeCode', '')
+                              event_type_category = event_data.get('eventTypeCategory', '')
+                              service = event_data.get('service', '')
+                              arn = event_data.get('arn', '')
+                              
+                              # Create the __summary structure that server.js expects
+                              summary_structure = {
+                                  'title': f"{service} - {event_type_code}" if service and event_type_code else (service or event_type_code or 'Health Event'),
+                                  'schedule': [{
+                                      'event': event_type_code,
+                                      'datetime': event_data.get('startTime', '')
+                                  }],
+                                  'risk': 'N/A'  # Default risk level
+                              }
+                              
+                              # Map event category for classification
+                              event_category = 'issue'  # default
+                              if 'scheduled' in event_type_code.lower() or 'maintenance' in event_type_code.lower():
+                                  event_category = 'scheduledChange'
+                              elif event_type_category == 'accountNotification':
+                                  event_category = 'accountNotification'
+                              elif 'investigation' in event_type_code.lower():
+                                  event_category = 'investigation'
+                              
                               item = {
-                                  'healthkey': event_data.get('arn', ''),
+                                  'healthkey': arn,
+                                  'arn': arn,                           # Direct ARN field for React component
+                                  'event_type': event_type_code,        # Direct event_type field for server.js fallback
+                                  'eventCategory': event_category,      # Category for classification
+                                  'name': f"{service} Health Event",    # Name field for server.js fallback
+                                  '__summary': summary_structure,       # Summary structure for server.js primary lookup
                                   'status_code': event_data.get('statusCode', 'unknown'),
                                   'start_time': str(event_data.get('startTime', '')),
-                                  'service': event_data.get('service', ''),
-                                  'event_type_code': event_data.get('eventTypeCode', ''),
-                                  'event_type_category': event_data.get('eventTypeCategory', ''),
+                                  'last_update': str(event_data.get('lastUpdatedTime', event_data.get('startTime', ''))),
+                                  'service': service,
+                                  'event_type_code': event_type_code,
+                                  'event_type_category': event_type_category,
                                   'region': event_data.get('region', ''),
                                   'end_time': str(event_data.get('endTime', '')),
                                   'last_updated_time': str(event_data.get('lastUpdatedTime', '')),
                                   'event_scope_code': event_data.get('eventScopeCode', ''),
+                                  'description': event_data.get('details', ''),
                                   'details': event_data.get('details', ''),
                                   'raw_data': json.dumps(event_data)
                               }

@@ -1,5 +1,9 @@
 #!/bin/bash
 
+echo "Enter the AWS region (e.g., us-east-1, us-east-2): "
+read AWS_REGION
+export AWS_DEFAULT_REGION=$AWS_REGION
+
 echo "Enter the bucket name for resource upload: "
 read RESOURCE_BUCKET_NAME
 

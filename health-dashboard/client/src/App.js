@@ -31,6 +31,9 @@ function App() {
 
   const handleDrillDown = useCallback(async (filtersParam) => {
     try {
+      console.log('🚀 handleDrillDown called with:', filtersParam);
+      console.log('🚀 filtersParam type:', typeof filtersParam);
+      
       // Track where user came from before closing views
       if (showAgenticDiagnostics) {
         setPreviousView('agentic');
@@ -47,15 +50,28 @@ function App() {
       setShowDrillDownDetail(true);
       setDrillDownData({ loading: true });
       
-      const response = await fetch(`/api/drill-down-details?filters=${encodeURIComponent(filtersParam)}`);
+      const encodedFilters = encodeURIComponent(filtersParam);
+      const apiUrl = `/api/drill-down-details?filters=${encodedFilters}`;
+      console.log('🌐 Making API call to:', apiUrl);
+      
+      const response = await fetch(apiUrl, {
+        credentials: 'include'
+      });
+      
+      console.log('📡 API response status:', response.status);
+      console.log('📡 API response ok:', response.ok);
       
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ API error response:', errorText);
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
       const data = await response.json();
+      console.log('📊 API response data:', data);
       
       if (data.success) {
+        console.log('✅ Setting drill-down data with', data.events?.length, 'events');
         setDrillDownData({
           events: data.events,
           count: data.count,
@@ -64,6 +80,7 @@ function App() {
           loading: false
         });
       } else {
+        console.error('❌ API returned error:', data);
         setDrillDownData({
           error: data.message || data.error || 'Failed to load drill-down details',
           details: data,
@@ -71,12 +88,138 @@ function App() {
         });
       }
     } catch (error) {
+      console.error('❌ handleDrillDown error:', error);
       setDrillDownData({
         error: `Network error: ${error.message}`,
         loading: false
       });
     }
   }, [showAgenticDiagnostics]);
+
+  // New improved function to extract filters from table rows
+  const extractFiltersFromTableRow = useCallback((tableRow) => {
+    try {
+      console.log('🔍 Extracting filters from table row:', tableRow);
+      
+      // Try to find data attributes first (most reliable)
+      const dataAttributes = {};
+      if (tableRow.dataset) {
+        Object.keys(tableRow.dataset).forEach(key => {
+          if (['service', 'statusCode', 'eventCategory', 'region', 'startTime', 'eventType', 'arn'].includes(key)) {
+            dataAttributes[key] = tableRow.dataset[key];
+          }
+        });
+      }
+      
+      if (Object.keys(dataAttributes).length > 0) {
+        console.log('✅ Found data attributes:', dataAttributes);
+        return dataAttributes;
+      }
+      
+      // Fallback: Parse table cells
+      const cells = tableRow.querySelectorAll('td, th, div[class*="col-"]');
+      const rowText = tableRow.textContent || '';
+      
+      let filters = {};
+      
+      // Enhanced service detection with more comprehensive mapping
+      const servicePatterns = {
+        'S3': /\b(S3|Simple Storage|Amazon S3)\b/i,
+        'EC2': /\b(EC2|Elastic Compute|Amazon EC2)\b/i,
+        'RDS': /\b(RDS|Relational Database|Amazon RDS)\b/i,
+        'LAMBDA': /\b(Lambda|AWS Lambda)\b/i,
+        'CLOUDWATCH': /\b(CloudWatch|Amazon CloudWatch)\b/i,
+        'ELB': /\b(ELB|Load Balancer|Elastic Load)\b/i,
+        'VPC': /\b(VPC|Virtual Private Cloud)\b/i,
+        'IAM': /\b(IAM|Identity and Access)\b/i,
+        'CLOUDFORMATION': /\b(CloudFormation|AWS CloudFormation)\b/i,
+        'TRUSTEDADVISOR': /\b(Trusted Advisor|TrustedAdvisor)\b/i,
+        'BEDROCK': /\b(Bedrock|AWS Bedrock)\b/i
+      };
+      
+      // Check each cell for service patterns
+      cells.forEach(cell => {
+        const cellText = cell.textContent || '';
+        for (const [service, pattern] of Object.entries(servicePatterns)) {
+          if (pattern.test(cellText)) {
+            filters.service = service;
+            break;
+          }
+        }
+      });
+      
+      // If no service found in cells, check full row text
+      if (!filters.service) {
+        for (const [service, pattern] of Object.entries(servicePatterns)) {
+          if (pattern.test(rowText)) {
+            filters.service = service;
+            break;
+          }
+        }
+      }
+      
+      // Enhanced status detection
+      const statusPatterns = {
+        'open': /\b(open|active)\b/i,
+        'upcoming': /\b(upcoming|scheduled|planned)\b/i,
+        'closed': /\b(closed|completed|resolved|finished)\b/i
+      };
+      
+      for (const [status, pattern] of Object.entries(statusPatterns)) {
+        if (pattern.test(rowText)) {
+          filters.status_code = status;
+          break;
+        }
+      }
+      
+      // Try to extract date/time information
+      const dateMatch = rowText.match(/(\d{4}-\d{2}-\d{2})/);
+      if (dateMatch) {
+        filters.start_time = dateMatch[1];
+      }
+      
+      // Ensure we have at least one meaningful filter
+      if (!filters.service && !filters.status_code) {
+        console.warn('⚠️ Could not extract meaningful filters, using fallback');
+        filters = { status_code: 'open' };
+      }
+      
+      console.log('✅ Extracted filters:', filters);
+      return filters;
+      
+    } catch (error) {
+      console.error('❌ Error extracting filters:', error);
+      return { status_code: 'open' }; // Fallback
+    }
+  }, []);
+
+  // Enhanced View Details click handler
+  const handleViewDetailsClick = useCallback((event) => {
+    try {
+      console.log('🔍 Enhanced View Details handler triggered');
+      
+      // Find the closest table row
+      let tableRow = event.target.closest('tr');
+      if (!tableRow) {
+        tableRow = event.target.closest('div[class*="table-row"], div[class*="row"]');
+      }
+      
+      if (tableRow) {
+        const filters = extractFiltersFromTableRow(tableRow);
+        const filtersString = JSON.stringify(filters);
+        console.log('🚀 Calling handleDrillDown with enhanced filters:', filtersString);
+        handleDrillDown(filtersString);
+      } else {
+        console.warn('⚠️ Could not find table row, using minimal filter');
+        const minimalFilters = JSON.stringify({ status_code: 'open' });
+        handleDrillDown(minimalFilters);
+      }
+    } catch (error) {
+      console.error('❌ Error in enhanced View Details handler:', error);
+      const fallbackFilters = JSON.stringify({ status_code: 'open' });
+      handleDrillDown(fallbackFilters);
+    }
+  }, [extractFiltersFromTableRow, handleDrillDown]);
 
   useEffect(() => {
     fetchCategories();
@@ -92,9 +235,9 @@ function App() {
       console.log('🔗 Target tagName:', event.target.tagName);
       console.log('🔗 Target className:', event.target.className);
       
-      // Check for various drill-down link patterns
-      const isDrillDownLink = event.target.matches('a[href*="/drill-down"]') || 
-                             event.target.matches('a[href*="drill-down"]') ||
+      // Check for various drill-down link patterns - improved detection
+      const isDrillDownLink = (event.target.tagName === 'A' && event.target.href && event.target.href.includes('/drill-down')) ||
+                             (event.target.tagName === 'A' && event.target.href && event.target.href.includes('drill-down')) ||
                              (event.target.textContent && event.target.textContent.includes('View Details')) ||
                              (event.target.textContent && event.target.textContent.includes('drill-down')) ||
                              // Also check parent elements for "View Details" text
@@ -106,14 +249,17 @@ function App() {
         console.log('✅ Drill-down link clicked!');
         event.preventDefault();
         
-        if (event.target.href) {
+        if (event.target.href && event.target.href.includes('drill-down')) {
           try {
             const url = new URL(event.target.href, window.location.origin);
             const filters = url.searchParams.get('filters');
             
             console.log('🔍 Extracted filters:', filters);
+            console.log('🔍 Filters type:', typeof filters);
+            console.log('🔍 Full URL:', event.target.href);
             
             if (filters) {
+              console.log('🚀 Calling handleDrillDown with filters:', filters);
               handleDrillDown(filters);
             } else {
               console.warn('⚠️ No filters found in URL:', event.target.href);
@@ -140,135 +286,10 @@ function App() {
               handleDrillDown(filters);
             }
           } else if (event.target.textContent && event.target.textContent.includes('View Details')) {
-            // For "View Details" links without proper URLs, try to extract context from the table row
-            
-            // Find the parent table row - try multiple approaches
-            let tableRow = event.target.closest('tr');
-            if (!tableRow) {
-              tableRow = event.target.closest('div[class*="table-row"], div[class*="row"]');
-            }
-            if (!tableRow) {
-              const parentTd = event.target.closest('td');
-              if (parentTd) {
-                tableRow = parentTd.closest('tr');
-              }
-            }
-            if (!tableRow) {
-              let parent = event.target.parentElement;
-              while (parent && parent !== document.body) {
-                const textContent = parent.textContent;
-                if (textContent && textContent.includes('EC2') && textContent.includes('View Details')) {
-                  tableRow = parent;
-                  break;
-                }
-                parent = parent.parentElement;
-              }
-            }
-            
-            if (tableRow) {
-              console.log('🔍 Found table row:', tableRow);
-              console.log('🔍 Table row HTML:', tableRow.outerHTML.substring(0, 300));
-              
-              // Try to extract service and event type from the row
-              const cells = tableRow.querySelectorAll('td, div[class*="col-"], th');
-              const rowText = tableRow.textContent;
-              
-              let service = '';
-              let eventCategory = '';
-              let status = '';
-              
-              // Enhanced service name mapping - map display names to database values
-              const serviceMapping = {
-                'EC2': ['EC2', 'Amazon Elastic Compute Cloud', 'Elastic Compute Cloud'],
-                'S3': ['S3', 'Amazon Simple Storage Service', 'Simple Storage Service'],
-                'RDS': ['RDS', 'Amazon Relational Database Service', 'Relational Database Service'],
-                'Lambda': ['Lambda', 'AWS Lambda'],
-                'CloudWatch': ['CloudWatch', 'Amazon CloudWatch'],
-                'ELB': ['ELB', 'Elastic Load Balancing', 'Load Balancer'],
-                'VPC': ['VPC', 'Amazon Virtual Private Cloud', 'Virtual Private Cloud'],
-                'IAM': ['IAM', 'AWS Identity and Access Management'],
-                'CloudFormation': ['CloudFormation', 'AWS CloudFormation'],
-                'TRUSTEDADVISOR': ['TRUSTEDADVISOR', 'Trusted Advisor', 'AWS Trusted Advisor']
-              };
-              
-              // Try to extract information from cells first
-              cells.forEach((cell, index) => {
-                const text = cell.textContent.trim();
-                
-                // Enhanced service matching - check against all possible service names
-                for (const [key, variations] of Object.entries(serviceMapping)) {
-                  if (variations.some(variation => text.includes(variation))) {
-                    service = key;
-                    break;
-                  }
-                }
-                
-                // Common patterns for status - map to database values
-                if (text.match(/^(Open|Active)/i)) {
-                  status = 'open';
-                } else if (text.match(/^(Upcoming|Scheduled)/i)) {
-                  status = 'upcoming';
-                } else if (text.match(/^(Closed|Completed|Resolved)/i)) {
-                  status = 'closed';
-                }
-                
-                // Common patterns for event categories
-                if (text.match(/(Retirement|Reservation|Optimization|Migration|Notification)/i)) {
-                  eventCategory = 'accountNotification';
-                }
-              });
-              
-              // If no cells found or no service extracted, try parsing the full row text
-              if (!service && rowText) {
-                // Enhanced service matching for full row text
-                for (const [key, variations] of Object.entries(serviceMapping)) {
-                  if (variations.some(variation => rowText.includes(variation))) {
-                    service = key;
-                    break;
-                  }
-                }
-                
-                const statusMatch = rowText.match(/(Open|Active|Upcoming|Scheduled|Closed|Completed|Resolved)/i);
-                if (statusMatch) {
-                  const matchedStatus = statusMatch[1].toLowerCase();
-                  if (matchedStatus.match(/^(open|active)/i)) {
-                    status = 'open';
-                  } else if (matchedStatus.match(/^(upcoming|scheduled)/i)) {
-                    status = 'upcoming';
-                  } else if (matchedStatus.match(/^(closed|completed|resolved)/i)) {
-                    status = 'closed';
-                  }
-                }
-              }
-              
-              // Always create filters - if no specific service found, use a broad query
-              let filters = {};
-              
-              if (service) {
-                filters.service = service;
-              }
-              
-              if (status) {
-                filters.status_code = status;
-              } else {
-                // Default to open/upcoming events if no status extracted
-                filters.status_code = 'open';
-              }
-              
-              // Only add eventCategory if we have a specific match
-              if (eventCategory && eventCategory !== 'accountNotification') {
-                filters.eventCategory = eventCategory;
-              }
-              
-              const filtersString = JSON.stringify(filters);
-              handleDrillDown(filtersString);
-            } else {
-              // Always query with minimal filter - no static content
-              const minimalFilters = JSON.stringify({
-                status_code: 'open'
-              });
-              handleDrillDown(minimalFilters);
-            }
+            // Use the new enhanced View Details handler
+            console.log('🔍 View Details link detected, using enhanced handler');
+            event.preventDefault();
+            handleViewDetailsClick(event);
           }
         }
       }
@@ -306,6 +327,13 @@ function App() {
       observer.disconnect();
     };
   }, []);
+
+  // Debug function to test drill-down functionality (can be called from browser console)
+  window.testDrillDown = (filters) => {
+    console.log('🧪 Testing drill-down with filters:', filters);
+    const testFilters = filters || '{"eventCategory":"scheduledChange","service":"AIRFLOW","status_code":"upcoming"}';
+    handleDrillDown(testFilters);
+  };
 
   // Debug function to inspect View Details links (can be called from browser console)
   window.debugViewDetailsLinks = () => {
@@ -346,7 +374,9 @@ function App() {
   const fetchCategories = async () => {
     try {
       setCategoriesLoading(true);
-      const response = await fetch('/api/categories');
+      const response = await fetch('/api/categories', {
+        credentials: 'include'
+      });
       const data = await response.json();
       setCategories(data);
       setInitialLoading(false);
@@ -582,17 +612,13 @@ Include all critical events for this time period with complete details for each 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          prompt: `Show me ALL events where start_time is between ${startDate} and ${currentDate} (past 120 days) AND status is 'upcoming' or 'open'. These are past due events. Filter by start_time >= '${startDate}' AND start_time < '${currentDate}' AND status in ('upcoming', 'open').
-
-Return a complete HTML table with ALL matching events. Format as HTML table with these columns:
-Time
-AWS Service
-Title
-Event
-Business Impact
+          prompt: `Show me all critical events that have start_time between ${startDate} and ${currentDate}. Query all existing events in the database and filter for those with start_time in this past date range. Include events with status 'upcoming' or 'open' and focus on events that are past due. Please format the response as an HTML table with the following columns:
+Time 
+AWS Service  
+Title 
+Event 
 Status
-
-Show every single past due event found. Do not limit or summarize results.`
+Include all past due events for this time period with complete details for each column.`
         })
       });
       

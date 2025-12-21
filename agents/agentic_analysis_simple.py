@@ -16,9 +16,135 @@ os.environ["BYPASS_TOOL_CONSENT"] = "true"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def load_aws_region():
+    """Load AWS region from .env file or environment variable"""
+    # First try environment variable
+    aws_region = os.getenv('AWS_REGION')
+    if aws_region:
+        return aws_region
+    
+    # Try to read from .env file
+    env_file_path = os.path.join(os.path.dirname(__file__), '..', 'health-dashboard', '.env')
+    if os.path.exists(env_file_path):
+        try:
+            with open(env_file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('AWS_REGION='):
+                        aws_region = line.split('=', 1)[1]
+                        logger.info(f"Loaded AWS_REGION from .env: {aws_region}")
+                        return aws_region
+        except Exception as e:
+            logger.warning(f"Failed to read .env file: {e}")
+    
+    # Default fallback
+    logger.info("Using default AWS region: us-east-1")
+    return 'us-east-1'
+
+# Get AWS region
+AWS_REGION = load_aws_region()
+logger.info(f"Using AWS region: {AWS_REGION}")
+
 # Initialize DynamoDB connection
-dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
 table = dynamodb.Table('chaplin-health-events')
+
+def generate_drill_down_url(event_data: Dict[str, Any]) -> str:
+    """
+    Generate a proper drill-down URL with encoded filters for a specific event.
+    
+    Args:
+        event_data: Dictionary containing event fields
+        
+    Returns:
+        Complete drill-down URL with encoded filters
+    """
+    try:
+        # Extract key fields from the event data
+        filters = {}
+        
+        # Always include service if available
+        if event_data.get('service'):
+            filters['service'] = event_data['service']
+        
+        # Always include status_code if available
+        if event_data.get('status_code'):
+            filters['status_code'] = event_data['status_code']
+        
+        # Include eventCategory using exact value from event
+        if event_data.get('eventCategory'):
+            filters['eventCategory'] = event_data['eventCategory']
+        
+        # Include region if available
+        if event_data.get('region'):
+            filters['region'] = event_data['region']
+        
+        # Include start_time for specificity if available
+        if event_data.get('start_time'):
+            filters['start_time'] = event_data['start_time']
+        
+        # Include event_type if available and specific
+        if event_data.get('event_type'):
+            filters['event_type'] = event_data['event_type']
+        
+        # Include ARN if available (most specific identifier)
+        if event_data.get('arn'):
+            filters['arn'] = event_data['arn']
+        
+        # Ensure we have at least one filter
+        if not filters:
+            filters = {'status_code': 'open'}  # Fallback
+        
+        # Convert to JSON and URL encode
+        import urllib.parse
+        filters_json = json.dumps(filters)
+        encoded_filters = urllib.parse.quote(filters_json)
+        
+        # Generate the drill-down URL
+        drill_down_url = f"/api/drill-down-details?filters={encoded_filters}"
+        
+        logger.info(f"Generated drill-down URL with filters: {filters}")
+        return drill_down_url
+        
+    except Exception as e:
+        logger.error(f"Error generating drill-down URL: {e}")
+        # Return a fallback URL
+        fallback_filters = json.dumps({'status_code': 'open'})
+        encoded_fallback = urllib.parse.quote(fallback_filters)
+        return f"/api/drill-down-details?filters={encoded_fallback}"
+
+def enhance_events_with_drill_down_urls(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Enhance event data with proper drill-down URLs for each event.
+    
+    Args:
+        events: List of event dictionaries
+        
+    Returns:
+        List of events with added drill_down_url field
+    """
+    enhanced_events = []
+    
+    for event in events:
+        enhanced_event = event.copy()
+        enhanced_event['drill_down_url'] = generate_drill_down_url(event)
+        enhanced_events.append(enhanced_event)
+    
+    return enhanced_events
+
+def create_drill_down_link_html(event_data: Dict[str, Any], link_text: str = "View Details") -> str:
+    """
+    Create HTML for a drill-down link with proper filters.
+    
+    Args:
+        event_data: Dictionary containing event fields
+        link_text: Text to display for the link
+        
+    Returns:
+        HTML string for the drill-down link
+    """
+    drill_down_url = generate_drill_down_url(event_data)
+    return f'<a href="{drill_down_url}" class="drill-down-link">{link_text}</a>'
 
 @tool
 def analyze_health_events(user_prompt: str) -> str:
@@ -63,17 +189,21 @@ def analyze_health_events(user_prompt: str) -> str:
         
         # Extract events from DBQueryBuilder result format
         events = []
+        query_method = "unknown"
         if isinstance(result, dict):
             # Handle new response formats from fixed DBQueryBuilder
             if 'events' in result:
-                # New format: {events: [...], count: N, query_type: "..."}
+                # New format: {events: [...], count: N, query_type: "...", query_method: "..."}
                 events = result['events']
+                query_method = result.get('query_method', result.get('query_type', 'unknown'))
             elif result.get('status') == 'success' and 'data' in result:
                 events = result['data']
+                query_method = result.get('query_method', 'table scan')
             elif result.get('status') == 'summarized' and 'data' in result:
                 # For summarized data, use the sample and recent records
                 summary_data = result['data']
                 events = summary_data.get('sample_records', []) + summary_data.get('recent_records', [])
+                query_method = result.get('query_method', 'table scan (summarized)')
                 # Remove duplicates while preserving order
                 seen = set()
                 unique_events = []
@@ -84,20 +214,23 @@ def analyze_health_events(user_prompt: str) -> str:
                         unique_events.append(event)
                 events = unique_events
             elif result.get('status') == 'too_many_results':
-                return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>⚠️ {result.get('message', 'Too many results')}</p>"
+                query_method = result.get('query_method', 'unknown')
+                return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>⚠️ {result.get('message', 'Too many results')} (Query method: {query_method})</p>"
             elif result.get('status') == 'no_data':
-                return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>No events found matching your criteria.</p>"
+                query_method = result.get('query_method', 'unknown')
+                return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>No events found matching your criteria. (Query method: {query_method})</p>"
             elif 'error' in result:
                 return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>⚠️ Query error: {result.get('error', 'Unknown error')}</p>"
             elif result.get('status') == 'error':
                 return f"<h3>⚠️ Analysis Error</h3><p>{result.get('message', 'Query execution failed')}</p>"
         elif isinstance(result, list):
             events = result
+            query_method = "legacy format"
             
-        logger.info(f"Extracted {len(events)} events for analysis")
+        logger.info(f"Extracted {len(events)} events for analysis using {query_method}")
         
         if len(events) >= 2000:
-            return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>⚠️ Query returned {len(events)} records, exceeding limit. Please refine your query.</p>"
+            return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>⚠️ Query returned {len(events)} records, exceeding limit. Please refine your query. (Query method: {query_method})</p>"
         
         if not events:
             return f"<h3>📊 AWS HEALTH EVENTS ANALYSIS</h3>\n<p>No events found matching your criteria.</p>"
@@ -127,13 +260,83 @@ def analyze_health_events(user_prompt: str) -> str:
         else:
             data_for_analysis = {"full_data": events}
         
+        # Enhance events with drill-down URLs before analysis
+        if isinstance(data_for_analysis, dict):
+            if 'sample_records' in data_for_analysis:
+                data_for_analysis['sample_records'] = enhance_events_with_drill_down_urls(data_for_analysis['sample_records'])
+            if 'recent_records' in data_for_analysis:
+                data_for_analysis['recent_records'] = enhance_events_with_drill_down_urls(data_for_analysis['recent_records'])
+            if 'full_data' in data_for_analysis:
+                data_for_analysis['full_data'] = enhance_events_with_drill_down_urls(data_for_analysis['full_data'])
+        elif isinstance(data_for_analysis, list):
+            data_for_analysis = enhance_events_with_drill_down_urls(data_for_analysis)
+        
         # Generate analysis with retry logic
         logger.info("Generating analysis...")
+        
+        # Extract query context for better filter generation
+        query_context = {
+            'user_query': user_prompt.lower(),
+            'has_status_filter': any(word in user_prompt.lower() for word in ['open', 'closed', 'status']),
+            'has_service_filter': any(service in user_prompt.upper() for service in ['S3', 'EC2', 'LAMBDA', 'RDS', 'ECS']),
+            'query_method': query_method
+        }
+        
+        # Extract actual field values from events for accurate filter generation
+        def extract_filter_examples(events_data):
+            """Extract actual field values from events to help AI generate correct filters"""
+            examples = {}
+            
+            # Get events from either summary or full_data format
+            sample_events = []
+            if isinstance(events_data, dict):
+                if 'sample_records' in events_data:
+                    sample_events = events_data['sample_records'][:5]
+                elif 'full_data' in events_data:
+                    sample_events = events_data['full_data'][:5]
+            elif isinstance(events_data, list):
+                sample_events = events_data[:5]
+            
+            # Extract unique field combinations for filter examples
+            for event in sample_events:
+                service = event.get('service', '')
+                status = event.get('status_code', '')
+                category = event.get('eventCategory', '')
+                region = event.get('region', '')
+                
+                if service and status and category:
+                    key = f"{service}_{status}"
+                    if key not in examples:
+                        examples[key] = {
+                            'service': service,
+                            'status_code': status,
+                            'eventCategory': category,
+                            'region': region if region else 'global'
+                        }
+            
+            return examples
+        
+        filter_examples = extract_filter_examples(data_for_analysis)
+        
+        # Add sample event structure to help AI understand field mappings
+        sample_event_structure = {
+            "filter_examples_from_actual_data": filter_examples,
+            "field_mapping_guide": {
+                "eventCategory": "Use EXACT eventCategory from event data - DO NOT assume or convert",
+                "service": "Use exact service name (S3, EC2, LAMBDA, etc.)",
+                "status_code": "Use exact status (open, closed)",
+                "region": "Use exact region (us-east-1, global, etc.)"
+            },
+            "critical_rule": "ALWAYS use the exact eventCategory value from the event data, never convert or assume"
+        }
+        
         analysis_agent = Agent()
         analysis_prompt = f"""
         Analyze AWS Health events for: {user_prompt}
         
         DATA: {json.dumps(data_for_analysis, indent=2, default=str)}
+        QUERY_CONTEXT: {json.dumps(query_context, indent=2)}
+        FIELD_MAPPING: {json.dumps(sample_event_structure, indent=2)}
         
         Provide a complete but CONCISE HTML document with:
         1. One summary table showing only the most critical events with CLICKABLE DRILL-DOWN LINKS
@@ -142,11 +345,21 @@ def analyze_health_events(user_prompt: str) -> str:
         4. One follow-up question
         
         CRITICAL DRILL-DOWN REQUIREMENTS:
-        - Each row in your summary table MUST include a clickable link for drill-down
-        - Use this exact format for drill-down links: <a href="/drill-down?filters=%7B%22account%22%3A%22ACCOUNT_ID%22%2C%22region%22%3A%22REGION%22%2C%22eventCategory%22%3A%22CATEGORY%22%2C%22service%22%3A%22SERVICE%22%7D" target="_blank" style="color: #007bff; text-decoration: underline;">View Details</a>
-        - Replace ACCOUNT_ID, REGION, CATEGORY, SERVICE with actual values from the summary row
-        - Include relevant filter criteria based on the summary row data (account, region, eventCategory, service, status_code)
-        - The URL encoding is already done in the example above - use this pattern
+        - Each event in the data now includes a 'drill_down_url' field with pre-generated filters
+        - Use the provided 'drill_down_url' field directly in your HTML links
+        - DO NOT create your own filter URLs - use the provided drill_down_url exactly as given
+        - Format: <a href="[drill_down_url]" class="drill-down-link">View Details</a>
+        
+        EXAMPLE USAGE:
+        If an event has drill_down_url="/api/drill-down-details?filters=%7B%22service%22%3A%22S3%22%7D"
+        Use: <a href="/api/drill-down-details?filters=%7B%22service%22%3A%22S3%22%7D" class="drill-down-link">View Details</a>
+        
+        TABLE STRUCTURE:
+        - Include columns: Time, AWS Service, Title, Event, Status, Actions
+        - The Actions column should contain the drill-down link using the provided drill_down_url
+        - Each row represents one specific event with its unique drill-down URL
+        
+        SECURITY: Only use the pre-generated drill_down_url values from the event data. Never modify or create URLs manually.
         
         CRITICAL: Keep response under 2000 characters. Your response must be a complete HTML document starting with <html> and ending with </html>.
         Include minimal CSS styling. Focus on the most important information only.

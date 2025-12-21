@@ -16,6 +16,12 @@ Unlike traditional business intelligence dashboards with predefined schemas, Cha
 - Built-in dashboards for common use cases that includes Migration Requirements, Security & Compliance, Maintenance & Updates, Cost Impact Events, Operational Notifications, and Configuration Alerts with critical events analysis and drill-down capabilities
 - Multi-account data pipeline that collects health events across all customer accounts and centralizes data in S3 bucket, supporting flexible deployment models based on customer security posture (Option 1: Organizations APIs for centralized management, Option 2: Individual account deployments for customers with organizational restrictions)
 
+### Sample Screenshots 
+![1. AWS Health Dashboard - Overview](img/awshealthdashboard1.png)
+![2. Upcoming Critical Events in next 30 days](img/criticalhealth30days2.png)
+![3. AI Agentic Diagonistics](img/aiagenticdetails1.png)
+![4. AI Agentic Diagonistics...](img/aiagenticdetails2.png)
+
 ## Architecture
 
 ![Architecture Diagram](img/architecture.png)

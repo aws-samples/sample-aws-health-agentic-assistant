@@ -1931,7 +1931,7 @@ app.post('/api/agent-analysis', requireAuth, (req, res) => {
 });
 
 // Drill-down details endpoint
-app.get('/api/drill-down-details', async (req, res) => {
+app.get('/api/drill-down-details', requireAuth, async (req, res) => {
   try {
     const { filters } = req.query;
     
@@ -1955,16 +1955,21 @@ app.get('/api/drill-down-details', async (req, res) => {
     }
     
     // Validate that we have at least one filter
-    const validFilters = ['account', 'region', 'eventCategory', 'service', 'status_code'];
+    const validFilters = ['account', 'region', 'eventCategory', 'service', 'status_code', 'event_type', 'start_time', 'arn'];
     const hasValidFilter = validFilters.some(key => parsedFilters[key]);
     
     if (!hasValidFilter) {
       return res.status(400).json({
         error: 'No valid filters provided',
-        message: 'At least one of the following filters is required: account, region, eventCategory, service, status_code',
+        message: 'At least one of the following filters is required: account, region, eventCategory, service, status_code, event_type, start_time, arn',
         validFilters: validFilters
       });
     }
+    
+    // Log the received filters for debugging
+    console.log('🔍 Drill-down filters received:', JSON.stringify(parsedFilters, null, 2));
+    console.log('🔍 Filter validation - hasValidFilter:', hasValidFilter);
+    console.log('🔍 Valid filter keys found:', Object.keys(parsedFilters).filter(key => validFilters.includes(key)));
     
     // Build DynamoDB scan parameters based on filters
     const scanParams = {
@@ -1975,14 +1980,14 @@ app.get('/api/drill-down-details', async (req, res) => {
     const expressionAttributeValues = {};
     const expressionAttributeNames = {};
     
-    // Add filters based on provided criteria
-    if (parsedFilters.account) {
+    // Add filters based on provided criteria with improved validation
+    if (parsedFilters.account && parsedFilters.account !== 'undefined' && parsedFilters.account !== '') {
       filterExpressions.push('#account = :account');
       expressionAttributeNames['#account'] = 'account';
       expressionAttributeValues[':account'] = parsedFilters.account;
     }
     
-    if (parsedFilters.region) {
+    if (parsedFilters.region && parsedFilters.region !== 'undefined' && parsedFilters.region !== '') {
       filterExpressions.push('#region = :region');
       expressionAttributeNames['#region'] = 'region';
       expressionAttributeValues[':region'] = parsedFilters.region;
@@ -2014,15 +2019,33 @@ app.get('/api/drill-down-details', async (req, res) => {
       }
     }
     
-    if (parsedFilters.service) {
+    if (parsedFilters.service && parsedFilters.service !== 'undefined' && parsedFilters.service !== '') {
       filterExpressions.push('#service = :service');
       expressionAttributeNames['#service'] = 'service';
       expressionAttributeValues[':service'] = parsedFilters.service;
     }
     
-    if (parsedFilters.status_code) {
+    if (parsedFilters.status_code && parsedFilters.status_code !== 'undefined' && parsedFilters.status_code !== '') {
       filterExpressions.push('status_code = :status_code');
       expressionAttributeValues[':status_code'] = parsedFilters.status_code;
+    }
+    
+    // Add support for event_type filter
+    if (parsedFilters.event_type && parsedFilters.event_type !== 'undefined' && parsedFilters.event_type !== '') {
+      filterExpressions.push('event_type = :event_type');
+      expressionAttributeValues[':event_type'] = parsedFilters.event_type;
+    }
+    
+    // Add support for start_time filter
+    if (parsedFilters.start_time && parsedFilters.start_time !== 'undefined' && parsedFilters.start_time !== '') {
+      filterExpressions.push('start_time = :start_time');
+      expressionAttributeValues[':start_time'] = parsedFilters.start_time;
+    }
+    
+    // Add support for arn filter (most specific)
+    if (parsedFilters.arn && parsedFilters.arn !== 'undefined' && parsedFilters.arn !== '') {
+      filterExpressions.push('arn = :arn');
+      expressionAttributeValues[':arn'] = parsedFilters.arn;
     }
     
     if (filterExpressions.length > 0) {
@@ -2055,6 +2078,14 @@ app.get('/api/drill-down-details', async (req, res) => {
     };
     
     const events = await scanAllPages(scanParams);
+    
+    // Log query execution details
+    console.log(`🔍 Drill-down query executed:`, {
+      filterExpression: scanParams.FilterExpression,
+      attributeValues: scanParams.ExpressionAttributeValues,
+      attributeNames: scanParams.ExpressionAttributeNames,
+      resultCount: events.length
+    });
     
     // Sort events by Account, Service, eventCategory, Start_time
     events.sort((a, b) => {
@@ -2090,6 +2121,12 @@ app.get('/api/drill-down-details', async (req, res) => {
       events: events,
       count: events.length,
       filters: parsedFilters,
+      queryInfo: {
+        filterExpression: scanParams.FilterExpression || 'No filters applied',
+        appliedFilters: Object.keys(parsedFilters).filter(key => 
+          parsedFilters[key] && parsedFilters[key] !== 'undefined' && parsedFilters[key] !== ''
+        )
+      },
       timestamp: new Date().toISOString()
     });
     
@@ -2099,6 +2136,55 @@ app.get('/api/drill-down-details', async (req, res) => {
       error: 'Failed to fetch drill-down details',
       message: error.message 
     });
+  }
+});
+
+// Debug endpoint to check S3 events with open status
+app.get('/api/debug-s3-open', requireAuth, async (req, res) => {
+  try {
+    const scanParams = {
+      TableName: 'chaplin-health-events',
+      FilterExpression: '#service = :service AND status_code = :status_code',
+      ExpressionAttributeNames: {
+        '#service': 'service'
+      },
+      ExpressionAttributeValues: {
+        ':service': 'S3',
+        ':status_code': 'open'
+      }
+    };
+    
+    const result = await dynamodb.scan(scanParams).promise();
+    const events = result.Items || [];
+    
+    console.log(`🔍 Debug S3 open events found: ${events.length}`);
+    events.forEach((event, index) => {
+      console.log(`Event ${index + 1}:`, {
+        service: event.service,
+        status_code: event.status_code,
+        eventCategory: event.eventCategory,
+        event_type_category: event.event_type_category,
+        event_type: event.event_type
+      });
+    });
+    
+    res.json({
+      success: true,
+      count: events.length,
+      events: events.map(event => ({
+        service: event.service,
+        status_code: event.status_code,
+        eventCategory: event.eventCategory,
+        event_type_category: event.event_type_category,
+        event_type: event.event_type,
+        arn: event.arn,
+        region: event.region
+      }))
+    });
+    
+  } catch (error) {
+    console.error('❌ Debug endpoint error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
