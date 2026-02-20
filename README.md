@@ -176,6 +176,7 @@ aws ec2 authorize-security-group-ingress --region <REGION> \
 The Security Group ID is shown in the deployment output. You can also modify it via the [EC2 Console → Security Groups](https://console.aws.amazon.com/ec2/home#SecurityGroups).
 
 **After deployment:**
+- The deploy script takes ~5-6 minutes (mostly the EC2 Instance Connect Endpoint creation). After that, the EC2 instance continues setting up in the background — installing dependencies, deploying Cognito/DynamoDB via CloudFormation, and building the React app. **Total time until the app is accessible: ~10-12 minutes.**
 - Access the app at `http://<EC2_PUBLIC_IP>:3001` (only from your IP)
 - Login with the email and temporary password shown in the deployment output (do not share the password — the user will be forced to change it on first login)
 

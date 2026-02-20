@@ -240,8 +240,9 @@ Resources:
               --notification-configuration file:///tmp/s3-notif.json \
               --region ${AwsRegion} || true
 
-          # Get EC2 public IP for CORS
-          EC2_PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4)
+          # Get EC2 public IP for CORS (IMDSv2 requires token)
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+          EC2_PUBLIC_IP=$(curl -s --max-time 5 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
 
           cat > /home/ec2-user/chaplin/health-dashboard/.env <<ENVFILE
           AWS_REGION=${AwsRegion}
