@@ -162,6 +162,10 @@ Resources:
                       response = s3.get_object(Bucket=bucket, Key=key)
                       data = json.loads(response['Body'].read().decode('utf-8'))
                       
+                      # Extract account ID from S3 key path: health/<account_id>/year/month/file.json
+                      key_parts = key.split('/')
+                      account_id = key_parts[1] if len(key_parts) > 1 and key_parts[1].isdigit() else ''
+                      
                       # Handle both formats:
                       # 1. Array format: {"events": [...]}
                       # 2. Single event format from upload_health.py
@@ -207,6 +211,7 @@ Resources:
                               item = {
                                   'healthkey': arn,
                                   'arn': arn,                           # Direct ARN field for React component
+                                  'account': account_id,               # Account ID from S3 key path
                                   'event_type': event_type_code,        # Direct event_type field for server.js fallback
                                   'eventCategory': event_category,      # Category for classification
                                   'name': f"{service} Health Event",    # Name field for server.js fallback
