@@ -64,7 +64,9 @@ chaplin/
 ├── upload/                             # DynamoDB table setup and data upload scripts
 ├── test_agentic_analysis.py            # Agent testing script
 ├── chaplin-infrastructure.yaml         # CloudFormation infrastructure template
-└── deploy_chaplin.sh                   # Deployment automation script
+├── chaplin-ec2-infrastructure.yaml     # CloudFormation EC2 deployment template
+├── deploy_chaplin.sh                   # Local deployment automation script
+└── deploy_chaplin_ec2.sh               # EC2 deployment automation script
 ```
 
 **Note**: The `output/` directory is created automatically at runtime for caching reports and analysis results.
@@ -89,9 +91,9 @@ chaplin/
 
 ## Installation
 
-### Deployment Steps
+### Local Deployment
 
-One script deploys Chaplin. The script handles database setup, dependency installation, and configuration.
+One script deploys Chaplin locally. The script handles database setup, dependency installation, and configuration.
 
 **Run the deployment script:**
 ```bash
@@ -107,21 +109,100 @@ chmod +x deploy_chaplin.sh
 **The script will:**
 1. Prompt for AWS Region (default: us-east-1)
 2. Prompt for S3 bucket name (must already exist for health event data)
-3. Deploy Cognito User Pool, DynamoDB Table, and S3-to-DynamoDB Lambda via CloudFormation
-4. Configure S3 event notification to trigger Lambda on new health events
-5. Install all dependencies and build the React application
-6. Create the required output directory
-7. Start the application automatically
+3. Prompt for Cognito user email
+4. Ask whether to restrict signups to that email domain (default: yes)
+5. Deploy Cognito User Pool, DynamoDB Table, and S3-to-DynamoDB Lambda via CloudFormation
+6. Configure S3 event notification to trigger Lambda on new health events
+7. Create a Cognito user with the provided email
+8. Install all dependencies and build the React application
+9. Create the required output directory
+10. Start the application automatically
 
-**To create a user:**
+After deployment, access the web dashboard at http://localhost:3001 and login with the email and temporary password shown in the deployment output. You will be forced to change the password on first login.
+
+**Note**: The script runs the server in the foreground. To run it in the background, press `Ctrl+C` to stop, then use one of:
 ```bash
-aws cognito-idp admin-create-user --user-pool-id <USER_POOL_ID> --username admin@example.com --message-action SUPPRESS --region us-east-1 && aws cognito-idp admin-set-user-password --user-pool-id <USER_POOL_ID> --username <user name> --password  <password>  --region us-east-1
+# Option 1: Using nohup
+cd health-dashboard && nohup npm start > chaplin.log 2>&1 &
+
+# Option 2: Using pm2 (recommended for persistent background process)
+npm install -g pm2
+cd health-dashboard && pm2 start npm --name chaplin -- start
 ```
-(The script will display the exact command with your User Pool ID)
 
-Alternatively, you can create users via the [Cognito console](https://docs.aws.amazon.com/cognito/latest/developerguide/how-to-create-user-accounts.html).
+### EC2 Deployment
 
-After creating a Cognito user, access the web dashboard at http://localhost:3001
+A single script deploys Chaplin to an EC2 instance with secure network configuration. All AWS resources are managed via CloudFormation for easy cleanup.
+
+**Run the EC2 deployment script:**
+```bash
+chmod +x deploy_chaplin_ec2.sh
+./deploy_chaplin_ec2.sh
+```
+
+**The script will prompt for:**
+1. AWS Region (default: us-east-1)
+2. S3 bucket name (must already exist)
+3. Cognito user email
+4. Whether to restrict signups to that email domain (default: yes)
+
+**Note**: The EC2 instance type defaults to `t3.medium`. To change it, edit the `INSTANCE_TYPE` variable at the top of `deploy_chaplin_ec2.sh`.
+
+**What it creates (two CloudFormation stacks):**
+
+| Stack | Resources |
+|-------|-----------|
+| `chaplin-ec2-<region>` | EC2 instance, Security Group, IAM Role/Instance Profile, EC2 Instance Connect Endpoint |
+| `chaplin-infrastructure-stack` | Cognito User Pool, DynamoDB Table, S3-to-DynamoDB Lambda |
+
+**Security features:**
+- Port 3001 is restricted to the deployer's public IP only (no public internet access)
+- No SSH port exposed — access is via [EC2 Instance Connect Endpoint](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-using-eice.html) (private connectivity)
+- Cognito authentication on the application layer
+- IAM instance profile with least-privilege permissions
+
+**Granting access to additional users:**
+
+By default, only the IP of the machine running the deploy script can access port 3001. To allow other users, add their IPs to the Security Group:
+```bash
+# Allow a specific IP
+aws ec2 authorize-security-group-ingress --region <REGION> \
+    --group-id <SECURITY_GROUP_ID> --protocol tcp --port 3001 --cidr <IP_ADDRESS>/32
+
+# Allow a CIDR range (e.g. office network)
+aws ec2 authorize-security-group-ingress --region <REGION> \
+    --group-id <SECURITY_GROUP_ID> --protocol tcp --port 3001 --cidr 10.0.0.0/8
+```
+The Security Group ID is shown in the deployment output. You can also modify it via the [EC2 Console → Security Groups](https://console.aws.amazon.com/ec2/home#SecurityGroups).
+
+**After deployment:**
+- Access the app at `http://<EC2_PUBLIC_IP>:3001` (only from your IP)
+- Login with the email and temporary password shown in the deployment output (do not share the password — the user will be forced to change it on first login)
+
+**SSH access (optional, for troubleshooting):**
+
+In the AWS Console: navigate to **EC2 → Instances**, select the **chaplin-ec2** instance, click **Connect**, choose the **EC2 Instance Connect** tab, and select **Connect using a Private IP**.
+
+With AWS CLI:
+```bash
+aws ec2-instance-connect ssh --instance-id <INSTANCE_ID> --os-user ec2-user --connection-type eice --region <REGION>
+```
+
+**Monitor deployment logs:**
+```bash
+tail -f /var/log/chaplin-deploy.log
+```
+
+**Check the running application:**
+```bash
+tmux attach -t chaplin
+```
+
+**Cleanup — delete all resources:**
+```bash
+aws cloudformation delete-stack --stack-name chaplin-ec2-<REGION> --region <REGION>
+aws cloudformation delete-stack --stack-name chaplin-infrastructure-stack --region <REGION>
+```
 
 ### Data Pipeline Setup
 

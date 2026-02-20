@@ -50,7 +50,7 @@ echo "Configuration"
 echo "=========================================="
 echo ""
 
-read -p "Enter AWS Region [us-east-1]: " AWS_REGION
+read -p "Enter AWS Region (default: us-east-1): " AWS_REGION
 AWS_REGION=${AWS_REGION:-us-east-1}
 print_info "Using region: $AWS_REGION"
 
@@ -67,6 +67,25 @@ if ! aws s3 ls "s3://$S3_BUCKET_NAME" --region $AWS_REGION &> /dev/null; then
     exit 1
 fi
 print_success "S3 bucket verified: $S3_BUCKET_NAME"
+
+echo ""
+read -p "Enter Cognito user email: " COGNITO_USER_EMAIL
+if [ -z "$COGNITO_USER_EMAIL" ]; then
+    print_error "Email is required"
+    exit 1
+fi
+
+# Extract domain and ask about restriction
+EMAIL_DOMAIN="${COGNITO_USER_EMAIL#*@}"
+read -p "Restrict signups to @${EMAIL_DOMAIN} only? [Y/n]: " RESTRICT_DOMAIN
+RESTRICT_DOMAIN=${RESTRICT_DOMAIN:-Y}
+if [[ "$RESTRICT_DOMAIN" =~ ^[Yy] ]]; then
+    ALLOWED_EMAIL_DOMAIN="$EMAIL_DOMAIN"
+    print_success "Signups restricted to @${EMAIL_DOMAIN}"
+else
+    ALLOWED_EMAIL_DOMAIN=""
+    print_info "Signups open to any email domain"
+fi
 
 # Infrastructure setup
 echo ""
@@ -258,6 +277,9 @@ COGNITO_CLIENT_SECRET=$COGNITO_CLIENT_SECRET
 PORT=3001
 NODE_ENV=development
 ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+
+# Email Domain Restriction
+ALLOWED_EMAIL_DOMAIN=$ALLOWED_EMAIL_DOMAIN
 EOF
 
 print_success "Environment configuration created"
@@ -303,8 +325,25 @@ if [ "$INFRA_CHOICE" == "1" ]; then
     echo "  Client ID: $COGNITO_CLIENT_ID"
     echo "  DynamoDB Table: $DYNAMODB_TABLE"
     echo ""
-    print_info "To create an admin user, run:"
-    echo "  aws cognito-idp admin-create-user --user-pool-id $COGNITO_USER_POOL_ID --username admin@example.com --message-action SUPPRESS --region $AWS_REGION && aws cognito-idp admin-set-user-password --user-pool-id $COGNITO_USER_POOL_ID --username admin@example.com --password Admin123! --permanent --region $AWS_REGION"
+
+    # Auto-create Cognito user
+    print_info "Creating Cognito user: $COGNITO_USER_EMAIL"
+    if aws cognito-idp admin-create-user \
+        --user-pool-id "$COGNITO_USER_POOL_ID" \
+        --username "$COGNITO_USER_EMAIL" \
+        --temporary-password "ChaplinTemp1!" \
+        --user-attributes Name=email,Value="$COGNITO_USER_EMAIL" Name=email_verified,Value=true \
+        --message-action SUPPRESS \
+        --region "$AWS_REGION" &>/dev/null; then
+
+        print_success "Cognito user created"
+        echo "  Email:    $COGNITO_USER_EMAIL"
+        echo "  Password: ChaplinTemp1!"
+        echo "  (You will be forced to change this on first login)"
+    else
+        print_error "Failed to create Cognito user"
+        print_info "Create manually: aws cognito-idp admin-create-user --user-pool-id $COGNITO_USER_POOL_ID --username $COGNITO_USER_EMAIL --message-action SUPPRESS --region $AWS_REGION"
+    fi
     echo ""
 fi
 echo "Next steps:"

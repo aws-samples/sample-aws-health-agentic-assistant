@@ -32,14 +32,31 @@
             <a href="/signup" class="signup-link">Don't have an account? Sign Up</a>
             <div id="error" class="error"></div>
         </form>
+        <form id="changePasswordForm" style="display:none;">
+            <p style="color:#333;margin-bottom:1rem;">You must set a new password to continue.</p>
+            <div class="form-group">
+                <label for="newPassword">New Password:</label>
+                <input type="password" id="newPassword" required minlength="8">
+            </div>
+            <div class="form-group">
+                <label for="confirmNewPassword">Confirm New Password:</label>
+                <input type="password" id="confirmNewPassword" required minlength="8">
+            </div>
+            <button type="submit">Set New Password</button>
+            <div id="changeError" class="error"></div>
+        </form>
     </div>
 
     <script>
+        let challengeSession = null;
+        let challengeUsername = null;
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
             const errorDiv = document.getElementById('error');
+            errorDiv.textContent = '';
 
             try {
                 const response = await fetch('/api/login', {
@@ -48,13 +65,50 @@
                     body: JSON.stringify({ username, password })
                 });
 
-                if (response.ok) {
+                const data = await response.json();
+
+                if (data.challengeRequired && data.challenge === 'NEW_PASSWORD_REQUIRED') {
+                    challengeSession = data.session;
+                    challengeUsername = username;
+                    document.getElementById('loginForm').style.display = 'none';
+                    document.getElementById('changePasswordForm').style.display = 'block';
+                } else if (data.success) {
                     window.location.href = '/';
                 } else {
-                    errorDiv.textContent = 'Invalid credentials';
+                    errorDiv.textContent = data.error || 'Invalid credentials';
                 }
             } catch (error) {
                 errorDiv.textContent = 'Login failed';
+            }
+        });
+
+        document.getElementById('changePasswordForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const newPassword = document.getElementById('newPassword').value;
+            const confirmNewPassword = document.getElementById('confirmNewPassword').value;
+            const errorDiv = document.getElementById('changeError');
+            errorDiv.textContent = '';
+
+            if (newPassword !== confirmNewPassword) {
+                errorDiv.textContent = 'Passwords do not match';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: challengeUsername, newPassword, session: challengeSession })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    window.location.href = '/';
+                } else {
+                    errorDiv.textContent = data.error || 'Failed to set new password';
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Failed to set new password';
             }
         });
     </script>

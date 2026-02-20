@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Chaplin EC2 Infrastructure - EC2, Security Group, IAM Role, EC2 Instance Connect Endpoint'
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.medium
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: Amazon Linux 2023 AMI ID
+  ClientCidr:
+    Type: String
+    Description: Client IP CIDR (e.g. 1.2.3.4/32) for app port access
+    AllowedPattern: '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/32$'
+  AppPort:
+    Type: Number
+    Default: 3001
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  VpcCidr:
+    Type: String
+    Description: VPC CIDR block (for SSH from EIC endpoint)
+  S3BucketName:
+    Type: String
+    Description: S3 bucket for health event data
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+  CognitoUserEmail:
+    Type: String
+    Description: Email for Cognito user creation
+  AllowedEmailDomain:
+    Type: String
+    Default: ''
+    Description: Restrict signups to this email domain (empty = allow all)
+
+Resources:
+
+  # ---- Security Group ----
+  ChaplinEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Chaplin EC2 - port ${AppPort} to client IP only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: !Ref ClientCidr
+          Description: App port - client IP only
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref VpcCidr
+          Description: SSH from VPC only (EC2 Instance Connect Endpoint)
+      Tags:
+        - Key: Name
+          Value: chaplin-ec2-sg
+
+  # ---- EC2 Instance Connect Endpoint SG ----
+  EICEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Instance Connect Endpoint SG
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: chaplin-eice-sg
+
+  # ---- EC2 Instance Connect Endpoint ----
+  ChaplinEICEndpoint:
+    Type: AWS::EC2::InstanceConnectEndpoint
+    Properties:
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref EICEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: chaplin-eice
+
+  # ---- IAM Role ----
+  ChaplinEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ChaplinEC2Role-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ChaplinEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'dynamodb:*'
+                Resource: !Sub 'arn:aws:dynamodb:${AwsRegion}:${AWS::AccountId}:table/chaplin-health-events*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketNotification
+                  - s3:PutBucketNotification
+                Resource: !Sub 'arn:aws:s3:::${S3BucketName}'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:ListFoundationModels
+                Resource: '*'
+              - Effect: Allow
+                Action: 'cognito-idp:*'
+                Resource: !Sub 'arn:aws:cognito-idp:${AwsRegion}:${AWS::AccountId}:userpool/*'
+              - Effect: Allow
+                Action: 'cloudformation:*'
+                Resource: !Sub 'arn:aws:cloudformation:${AwsRegion}:${AWS::AccountId}:stack/chaplin-infrastructure-stack*'
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:PassRole
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*chaplin*'
+              - Effect: Allow
+                Action: 'lambda:*'
+                Resource: !Sub 'arn:aws:lambda:${AwsRegion}:${AWS::AccountId}:function:chaplin-*'
+              - Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+
+  # ---- Instance Profile ----
+  ChaplinEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ChaplinEC2Role
+
+  # ---- EC2 Instance ----
+  ChaplinEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: ChaplinEC2InstanceProfile
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref ChaplinEC2SecurityGroup
+      IamInstanceProfile: !Ref ChaplinEC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: chaplin-ec2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+          exec > /var/log/chaplin-deploy.log 2>&1
+
+          dnf install -y git nodejs python3.11 python3.11-pip tmux unzip
+          alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+          # Install AWS CLI v2 (standalone binary, no Python dependency)
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install --update
+          rm -rf /tmp/awscliv2.zip /tmp/aws
+          export PATH=/usr/local/bin:$PATH
+
+          cd /home/ec2-user
+          git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git chaplin
+          chown -R ec2-user:ec2-user chaplin
+
+          su - ec2-user <<'INNER'
+          set -ex
+          export PATH=/usr/local/bin:$PATH
+          cd /home/ec2-user/chaplin
+
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install boto3 pandas numpy python-dotenv
+          pip install strands-agents 2>/dev/null || true
+          deactivate
+
+          cd health-dashboard
+          npm install
+          cd client && npm install && npm run build && cd ..
+          cd ..
+
+          STACK_NAME=chaplin-infrastructure-stack
+          aws cloudformation deploy \
+              --template-file /home/ec2-user/chaplin/chaplin-infrastructure.yaml \
+              --stack-name $STACK_NAME \
+              --region ${AwsRegion} \
+              --parameter-overrides HealthDataBucketName=${S3BucketName} \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changeset
+
+          COGNITO_USER_POOL_ID=$(aws cloudformation describe-stacks \
+              --stack-name $STACK_NAME --region ${AwsRegion} \
+              --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
+
+          COGNITO_CLIENT_ID=$(aws cloudformation describe-stacks \
+              --stack-name $STACK_NAME --region ${AwsRegion} \
+              --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
+
+          COGNITO_CLIENT_SECRET=$(aws cognito-idp describe-user-pool-client \
+              --user-pool-id $COGNITO_USER_POOL_ID --client-id $COGNITO_CLIENT_ID \
+              --region ${AwsRegion} --query 'UserPoolClient.ClientSecret' --output text)
+
+          LAMBDA_ARN=$(aws cloudformation describe-stacks \
+              --stack-name $STACK_NAME --region ${AwsRegion} \
+              --query 'Stacks[0].Outputs[?OutputKey==`S3ToDynamoDBLambdaArn`].OutputValue' --output text)
+
+          cat > /tmp/s3-notif.json <<NOTIF
+          {
+            "LambdaFunctionConfigurations": [{
+              "LambdaFunctionArn": "$LAMBDA_ARN",
+              "Events": ["s3:ObjectCreated:*"],
+              "Filter": {"Key": {"FilterRules": [{"Name": "suffix", "Value": ".json"}]}}
+            }]
+          }
+          NOTIF
+          aws s3api put-bucket-notification-configuration \
+              --bucket ${S3BucketName} \
+              --notification-configuration file:///tmp/s3-notif.json \
+              --region ${AwsRegion} || true
+
+          # Get EC2 public IP for CORS
+          EC2_PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4)
+
+          cat > /home/ec2-user/chaplin/health-dashboard/.env <<ENVFILE
+          AWS_REGION=${AwsRegion}
+          BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-20250514-v1:0
+          COGNITO_USER_POOL_ID=$COGNITO_USER_POOL_ID
+          COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID
+          COGNITO_CLIENT_SECRET=$COGNITO_CLIENT_SECRET
+          PORT=3001
+          NODE_ENV=production
+          ALLOWED_ORIGINS=http://$EC2_PUBLIC_IP:3001
+          ALLOWED_EMAIL_DOMAIN=${AllowedEmailDomain}
+          ENVFILE
+
+          mkdir -p /home/ec2-user/chaplin/output
+
+          aws cognito-idp admin-create-user \
+              --user-pool-id $COGNITO_USER_POOL_ID \
+              --username "${CognitoUserEmail}" \
+              --temporary-password "ChaplinTemp1!" \
+              --user-attributes Name=email,Value="${CognitoUserEmail}" Name=email_verified,Value=true \
+              --message-action SUPPRESS \
+              --region ${AwsRegion}
+
+          cat > /home/ec2-user/chaplin-info.txt <<INFO
+          COGNITO_USER_POOL_ID=$COGNITO_USER_POOL_ID
+          COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID
+          COGNITO_USER_EMAIL=${CognitoUserEmail}
+          INFO
+
+          cd /home/ec2-user/chaplin/health-dashboard
+          tmux new-session -d -s chaplin "source /home/ec2-user/chaplin/.venv/bin/activate && node server.js"
+          INNER
+
+          touch /home/ec2-user/chaplin-deploy-complete
+
+Outputs:
+  InstanceId:
+    Value: !Ref ChaplinEC2Instance
+  PrivateIp:
+    Value: !GetAtt ChaplinEC2Instance.PrivateIp
+  PublicIp:
+    Value: !GetAtt ChaplinEC2Instance.PublicIp
+  SecurityGroupId:
+    Value: !Ref ChaplinEC2SecurityGroup
+  EICEndpointId:
+    Value: !Ref ChaplinEICEndpoint
+  IAMRoleName:
+    Value: !Ref ChaplinEC2Role

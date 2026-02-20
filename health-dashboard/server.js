@@ -167,17 +167,33 @@ const requireAuth = (req, res, next) => {
 
 // Login route
 app.post('/api/login', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, newPassword, session: challengeSession } = req.body;
     
     try {
-        const params = {
-            UserPoolId: COGNITO_CONFIG.UserPoolId,
-            Username: username,
-            TemporaryPassword: password,
-            MessageAction: 'SUPPRESS'
-        };
-        
-        // Try admin authentication first
+        // Handle new password challenge response
+        if (newPassword && challengeSession) {
+            try {
+                const challengeResult = await cognito.adminRespondToAuthChallenge({
+                    UserPoolId: COGNITO_CONFIG.UserPoolId,
+                    ClientId: COGNITO_CONFIG.ClientId,
+                    ChallengeName: 'NEW_PASSWORD_REQUIRED',
+                    ChallengeResponses: {
+                        USERNAME: username,
+                        NEW_PASSWORD: newPassword,
+                        SECRET_HASH: require('crypto').createHmac('SHA256', COGNITO_CONFIG.ClientSecret).update(username + COGNITO_CONFIG.ClientId).digest('base64')
+                    },
+                    Session: challengeSession
+                }).promise();
+
+                req.session.user = { username, tokens: challengeResult.AuthenticationResult };
+                return res.json({ success: true, user: { username } });
+            } catch (challengeError) {
+                console.log('Change password error:', challengeError.message);
+                return res.status(400).json({ error: challengeError.message });
+            }
+        }
+
+        // Normal login
         try {
             const result = await cognito.adminInitiateAuth({
                 UserPoolId: COGNITO_CONFIG.UserPoolId,
@@ -190,6 +206,10 @@ app.post('/api/login', async (req, res) => {
                 }
             }).promise();
             
+            if (result.ChallengeName === 'NEW_PASSWORD_REQUIRED') {
+                return res.json({ challengeRequired: true, challenge: 'NEW_PASSWORD_REQUIRED', session: result.Session });
+            }
+
             req.session.user = { username, tokens: result.AuthenticationResult };
             res.json({ success: true, user: { username } });
         } catch (authError) {
@@ -202,13 +222,25 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// Signup config (returns domain restriction if set)
+app.get('/api/signup-config', (req, res) => {
+    const domain = process.env.ALLOWED_EMAIL_DOMAIN || '';
+    res.json({ allowedDomain: domain });
+});
+
 // Signup route
 app.post('/api/signup', async (req, res) => {
     const { email, password } = req.body;
     
-    // Validate @amazon.com domain
-    if (!email.endsWith('@amazon.com')) {
-        return res.status(400).json({ error: 'Only @amazon.com email addresses are allowed' });
+    // Validate input
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Validate email domain if restricted
+    const allowedDomain = process.env.ALLOWED_EMAIL_DOMAIN;
+    if (allowedDomain && !email.endsWith('@' + allowedDomain)) {
+        return res.status(400).json({ error: `Only @${allowedDomain} email addresses are allowed` });
     }
     
     try {
