@@ -984,28 +984,204 @@ app.post('/api/refresh-cache', async (req, res) => {
 });
 
 // Fallback non-streaming endpoint (with longer timeout)
+// --- Deterministic DynamoDB scan helper for critical event tiles ---
+async function scanCriticalEvents(startDate, endDate, statusCodes) {
+  const statusFilters = statusCodes.map((_, i) => `#status = :status${i}`).join(' OR ');
+  const exprValues = {
+    ':startDate': startDate,
+    ':endDate': endDate
+  };
+  statusCodes.forEach((s, i) => { exprValues[`:status${i}`] = s; });
+
+  const params = {
+    TableName: 'chaplin-health-events',
+    FilterExpression: `(${statusFilters}) AND #start_time BETWEEN :startDate AND :endDate`,
+    ExpressionAttributeNames: {
+      '#status': 'status_code',
+      '#start_time': 'start_time'
+    },
+    ExpressionAttributeValues: exprValues
+  };
+
+  const items = [];
+  let result = await dynamodb.scan(params).promise();
+  items.push(...(result.Items || []));
+  while (result.LastEvaluatedKey) {
+    params.ExclusiveStartKey = result.LastEvaluatedKey;
+    result = await dynamodb.scan(params).promise();
+    items.push(...(result.Items || []));
+  }
+  return items;
+}
+
+// Spawn LLM analysis on pre-fetched events (no DynamoDB query generation)
+// --- Deterministic table builder (matches MCP approach) ---
+function generateDrillDownUrl(event) {
+  const filters = {};
+  if (event.service) filters.service = event.service;
+  if (event.status_code) filters.status_code = event.status_code;
+  if (event.eventCategory) filters.eventCategory = event.eventCategory;
+  if (event.event_type) filters.event_type = event.event_type;
+  if (!Object.keys(filters).length) filters.status_code = 'open';
+  return `/api/drill-down-details?filters=${encodeURIComponent(JSON.stringify(filters))}`;
+}
+
+function buildDeterministicTable(events, title) {
+  if (!events.length) return '<h3>No events found matching the criteria.</h3>';
+
+  // Group by (date, service) — same logic as MCP _analyze_events
+  const grouped = {};
+  for (const e of events) {
+    const svc = e.service || 'Unknown';
+    const start = (e.start_time || 'Unknown').substring(0, 10);
+    const key = `${start}|${svc}`;
+    if (!grouped[key]) {
+      grouped[key] = { date: start, service: svc, count: 0, statuses: new Set(), title: '', event_type: '', sampleEvent: e };
+    }
+    grouped[key].count++;
+    grouped[key].statuses.add(e.status_code || 'unknown');
+    if (!grouped[key].title) {
+      const summary = e.__summary || {};
+      if (typeof summary === 'object' && summary.title) {
+        grouped[key].title = typeof summary.title === 'object' && summary.title.S ? summary.title.S : String(summary.title);
+      }
+      grouped[key].event_type = e.event_type || '';
+    }
+  }
+
+  const rows = Object.values(grouped).sort((a, b) => a.date.localeCompare(b.date) || a.service.localeCompare(b.service));
+
+  let html = `<h2 style="color:#c62828;font-family:'Courier New',monospace">${title}</h2>\n<table style="border-collapse:collapse;width:100%;margin:10px 0;font-size:13px">\n`;
+  html += '<tr>' + ['Time','Service','Title','Event','Status','Actions'].map(h =>
+    `<th style="border:1px solid #ddd;padding:8px;text-align:left;background:#f5f5f5">${h}</th>`
+  ).join('') + '</tr>\n';
+
+  for (const r of rows) {
+    const label = r.title || r.event_type || 'N/A';
+    const status = [...r.statuses].sort().join(', ');
+    const statusDisplay = status.charAt(0).toUpperCase() + status.slice(1);
+    const drillUrl = generateDrillDownUrl(r.sampleEvent);
+    html += `<tr style="color:#c62828;font-weight:bold">` +
+      `<td style="border:1px solid #ddd;padding:6px">${r.date}</td>` +
+      `<td style="border:1px solid #ddd;padding:6px">${r.service}</td>` +
+      `<td style="border:1px solid #ddd;padding:6px">${label}</td>` +
+      `<td style="border:1px solid #ddd;padding:6px">${r.count} account(s)</td>` +
+      `<td style="border:1px solid #ddd;padding:6px">${statusDisplay}</td>` +
+      `<td style="border:1px solid #ddd;padding:6px"><a href="${drillUrl}" class="drill-down-link" style="color:#1976d2;text-decoration:none">View Details</a></td>` +
+      '</tr>\n';
+  }
+  html += '</table>';
+  return html;
+}
+
+function buildSummaryForLLM(events) {
+  // Build a concise text summary for the LLM (no HTML needed from LLM)
+  const grouped = {};
+  for (const e of events) {
+    const svc = e.service || 'Unknown';
+    const start = (e.start_time || 'Unknown').substring(0, 10);
+    const key = `${start}|${svc}`;
+    if (!grouped[key]) grouped[key] = { date: start, service: svc, count: 0, event_type: e.event_type || '' };
+    grouped[key].count++;
+  }
+  const rows = Object.values(grouped).sort((a, b) => a.date.localeCompare(b.date));
+  let text = `Total events: ${events.length}\n\n| Date | Service | Event Type | Accounts |\n|------|---------|-----------|----------|\n`;
+  for (const r of rows) text += `| ${r.date} | ${r.service} | ${r.event_type} | ${r.count} |\n`;
+  return text;
+}
+
+function spawnAnalysis(events, prompt, cacheFile, res, tableTitle) {
+  let responseSent = false;
+
+  // 1) Build deterministic HTML table server-side
+  const tableHtml = buildDeterministicTable(events, tableTitle || 'Critical AWS Health Events');
+
+  // 2) Build text summary for LLM insights only
+  const summaryText = buildSummaryForLLM(events);
+  const insightsPrompt = `Given these AWS health events:\n\n${summaryText}\n\nContext: ${prompt}\n\nProvide ONLY:\n1) Top 3 key insights\n2) Top 3 recommended actions\n\nBe concise. Do NOT repeat the table. Respond with a short HTML snippet using <h3> and <ul> tags only.`;
+
+  const pythonProcess = spawn(PYTHON_PATH, ['analyze_events_only.py', insightsPrompt], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, PYTHONPATH: path.join(__dirname, '..') }
+  });
+
+  // Send actual events so the Python script can analyze them
+  pythonProcess.stdin.write(JSON.stringify(events));
+  pythonProcess.stdin.end();
+
+  const TIMEOUT = 60000;
+  const timeoutId = setTimeout(() => {
+    if (!responseSent) {
+      pythonProcess.kill('SIGTERM');
+      responseSent = true;
+      res.status(504).json({ error: 'Analysis timeout', success: false });
+    }
+  }, TIMEOUT);
+
+  let output = '';
+  let error = '';
+  pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+  pythonProcess.stderr.on('data', (data) => { error += data.toString(); });
+
+  pythonProcess.on('close', (code) => {
+    clearTimeout(timeoutId);
+    if (responseSent) return;
+    responseSent = true;
+
+    // Extract insights HTML from LLM output
+    let insightsHtml = '';
+    if (code === 0 && output.trim()) {
+      const codeBlockMatch = output.match(/```html\s*([\s\S]*?)\s*```/);
+      if (codeBlockMatch) {
+        insightsHtml = codeBlockMatch[1].trim();
+      } else {
+        // Strip full <html> wrapper if present, keep just the body content
+        const bodyMatch = output.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+        insightsHtml = bodyMatch ? bodyMatch[1].trim() : output.trim();
+      }
+    }
+
+    // 3) Strip any duplicate tables/headings from LLM output, keep only insights
+    const cleanedInsights = insightsHtml
+      .replace(/<table[\s\S]*?<\/table>/gi, '')
+      .replace(/<h2[\s\S]*?<\/h2>/gi, '')
+      .trim();
+
+    // 4) Combine deterministic table + LLM insights
+    const combinedHtml = tableHtml + '\n' + cleanedInsights;
+
+    // Cache result
+    let existingTtl = 1;
+    if (fs.existsSync(cacheFile)) {
+      try { existingTtl = JSON.parse(fs.readFileSync(cacheFile, 'utf8')).ttl_hours || 1; } catch (e) {}
+    }
+    const cacheData = {
+      timestamp: new Date().toISOString(),
+      ttl_hours: existingTtl,
+      analysis: combinedHtml,
+      prompt: prompt
+    };
+    fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
+
+    res.json({
+      success: true,
+      output: combinedHtml,
+      cached: false,
+      lastRefreshed: cacheData.timestamp,
+      ttlHours: cacheData.ttl_hours
+    });
+  });
+}
+
 // Critical events endpoints
 app.get('/api/critical-events-count', requireAuth, async (req, res) => {
   try {
+    const now = new Date().toISOString().substring(0, 10);
     const thirtyDaysFromNow = new Date();
     thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
-    
-    const params = {
-      TableName: 'chaplin-health-events',
-      FilterExpression: '#start_time BETWEEN :now AND :thirtyDays AND contains(#event_type_code, :critical)',
-      ExpressionAttributeNames: {
-        '#start_time': 'start_time',
-        '#event_type_code': 'event_type_code'
-      },
-      ExpressionAttributeValues: {
-        ':now': new Date().toISOString(),
-        ':thirtyDays': thirtyDaysFromNow.toISOString(),
-        ':critical': 'critical'
-      }
-    };
-    
-    const result = await dynamodb.scan(params).promise();
-    res.json({ count: result.Items.length });
+
+    const items = await scanCriticalEvents(now, thirtyDaysFromNow.toISOString().substring(0, 10), ['upcoming', 'open']);
+    res.json({ count: items.length });
   } catch (error) {
     console.error('Error fetching critical events count:', error);
     res.status(500).json({ error: 'Failed to fetch critical events count' });
@@ -1042,147 +1218,29 @@ app.get('/api/critical-events-analysis-cached', (req, res) => {
   }
 });
 
-app.post('/api/critical-events-analysis-refresh', requireAuth, (req, res) => {
+app.post('/api/critical-events-analysis-refresh', requireAuth, async (req, res) => {
   try {
-    const { prompt } = req.body;
-    
-    // DEBUG: Log the incoming request
-    console.log('DEBUG - Incoming request:', {
-      hasPrompt: !!prompt,
-      promptType: typeof prompt,
-      promptLength: prompt ? prompt.length : 0,
-      promptPreview: prompt ? prompt.substring(0, 100) + '...' : 'undefined'
-    });
-    
-    // DEBUG: Log character codes to identify invalid characters
-    if (prompt) {
-      const invalidChars = [];
-      for (let i = 0; i < prompt.length; i++) {
-        const char = prompt[i];
-        const code = char.charCodeAt(0);
-        if (!/^[a-zA-Z0-9\s.,!?;:()\-'"@#%&*+=\[\]{}\/\\`\n\r]+$/.test(char)) {
-          invalidChars.push({ char, code, position: i });
-        }
-      }
-      if (invalidChars.length > 0) {
-        console.log('DEBUG - Invalid characters found:', invalidChars.slice(0, 10));
-      }
-    }
-    
-    // SECURITY: Validate and sanitize input
-    const validation = validateAndSanitizePrompt(prompt);
-    if (!validation.valid) {
-      console.log('DEBUG - Validation failed:', validation.error);
-      return res.status(400).json({ 
-        error: validation.error,
-        success: false 
-      });
-    }
-    
-    // LOG REQUEST for audit trail
+    const today = new Date().toISOString().substring(0, 10);
+    const thirtyDays = new Date();
+    thirtyDays.setDate(thirtyDays.getDate() + 30);
+    const endDate = thirtyDays.toISOString().substring(0, 10);
+
+    // Deterministic DynamoDB scan — status_code IN ('upcoming','open') + date range
+    const events = await scanCriticalEvents(
+      today, endDate, ['upcoming', 'open']
+    );
+
     console.log({
       timestamp: new Date().toISOString(),
       endpoint: '/api/critical-events-analysis-refresh',
       user: req.session.user?.username,
-      promptLength: validation.sanitized.length,
+      eventsFound: events.length,
       ip: req.ip
     });
-    
-    let responseSent = false;
-    
-    // Use sanitized prompt
-    const pythonProcess = spawn(PYTHON_PATH, ['test_agentic_analysis.py', validation.sanitized], {
-      cwd: path.join(__dirname, '..'),
-      env: { ...process.env, PYTHONPATH: path.join(__dirname, '..') }
-    });
-    
-    // SECURITY: Add timeout to prevent resource exhaustion
-    const TIMEOUT = 60000; // 60 seconds
-    const timeoutId = setTimeout(() => {
-      if (!responseSent) {
-        pythonProcess.kill('SIGTERM');
-        responseSent = true;
-        res.status(504).json({ error: 'Analysis timeout', success: false });
-      }
-    }, TIMEOUT);
-    
-    let output = '';
-    let error = '';
-    
-    pythonProcess.stdout.on('data', (data) => {
-      output += data.toString();
-    });
-    
-    pythonProcess.stderr.on('data', (data) => {
-      error += data.toString();
-    });
-    
-    pythonProcess.on('close', (code) => {
-      clearTimeout(timeoutId); // SECURITY: Clear timeout when process completes
-      if (!responseSent) {
-        responseSent = true;
-        if (code === 0) {
-          // Extract HTML content from ```html``` code blocks or <html> tags
-          let htmlContent = '';
-          
-          // First try to extract from ```html``` code blocks
-          const codeBlockMatch = output.match(/```html\s*([\s\S]*?)\s*```/);
-          if (codeBlockMatch) {
-            htmlContent = codeBlockMatch[1].trim();
-          } else {
-            // Fallback to <html> tags
-            const htmlMatch = output.match(/<html[\s\S]*?<\/html>/i);
-            htmlContent = htmlMatch ? htmlMatch[0] : output;
-          }
-          
-          // Cache only the HTML content
-          const cacheFile = path.join(__dirname, '../output/critical-events-cache.json');
-          
-          // Preserve existing TTL if cache file exists
-          let existingTtl = 1; // default
-          if (fs.existsSync(cacheFile)) {
-            try {
-              const existingCache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-              existingTtl = existingCache.ttl_hours || 1;
-            } catch (e) {
-              // Use default if can't read existing file
-            }
-          }
-          
-          const cacheData = {
-            timestamp: new Date().toISOString(),
-            ttl_hours: existingTtl,
-            analysis: htmlContent,
-            prompt: validation.sanitized // Use sanitized prompt
-          };
-          
-          fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
-          
-          res.json({
-            success: true,
-            output: htmlContent,
-            cached: false,
-            lastRefreshed: cacheData.timestamp,
-            ttlHours: cacheData.ttl_hours
-          });
-        } else {
-          res.status(500).json({
-            success: false,
-            error: 'Agent analysis failed',
-            stderr: error
-          });
-        }
-      }
-    });
-    
-    setTimeout(() => {
-      if (!responseSent) {
-        responseSent = true;
-        pythonProcess.kill();
-        res.status(408).json({ error: 'Agent analysis timeout' });
-      }
-    }, 60000);
-    
+
+    const prompt = `Show me all critical upcoming and open events with start_time in the next 30 days. Focus on events requiring immediate attention.`;
+    const cacheFile = path.join(__dirname, '../output/critical-events-cache.json');
+    spawnAnalysis(events, prompt, cacheFile, res, 'Critical AWS Health Events \u2013 Next 30 Days');
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to start analysis' });
@@ -1221,123 +1279,34 @@ app.get('/api/critical-events-analysis-cached-60', (req, res) => {
   }
 });
 
-app.post('/api/critical-events-analysis-refresh-60', requireAuth, (req, res) => {
+app.post('/api/critical-events-analysis-refresh-60', requireAuth, async (req, res) => {
   try {
-    const { prompt } = req.body;
-    
-    // SECURITY: Validate and sanitize input
-    const validation = validateAndSanitizePrompt(prompt);
-    if (!validation.valid) {
-      return res.status(400).json({ 
-        error: validation.error,
-        success: false 
-      });
-    }
-    
-    // LOG REQUEST for audit trail
+    const today = new Date();
+    const thirtyDays = new Date(today);
+    thirtyDays.setDate(today.getDate() + 30);
+    const sixtyDays = new Date(today);
+    sixtyDays.setDate(today.getDate() + 60);
+
+    // Use date-only strings to avoid UTC offset issues
+    const startDate = thirtyDays.toISOString().substring(0, 10);
+    const endDate = sixtyDays.toISOString().substring(0, 10);
+
+    // Deterministic DynamoDB scan — status_code IN ('upcoming','open') + 30-60 day range
+    const events = await scanCriticalEvents(
+      startDate, endDate, ['upcoming', 'open']
+    );
+
     console.log({
       timestamp: new Date().toISOString(),
       endpoint: '/api/critical-events-analysis-refresh-60',
       user: req.session.user?.username,
-      promptLength: validation.sanitized.length,
+      eventsFound: events.length,
       ip: req.ip
     });
-    
-    let responseSent = false;
-    
-    // Use sanitized prompt
-    const pythonProcess = spawn(PYTHON_PATH, ['test_agentic_analysis.py', validation.sanitized], {
-      cwd: path.join(__dirname, '..'),
-      env: { ...process.env, PYTHONPATH: path.join(__dirname, '..') }
-    });
-    
-    // SECURITY: Add timeout to prevent resource exhaustion
-    const TIMEOUT = 60000; // 60 seconds
-    const timeoutId = setTimeout(() => {
-      if (!responseSent) {
-        pythonProcess.kill('SIGTERM');
-        responseSent = true;
-        res.status(504).json({ error: 'Analysis timeout', success: false });
-      }
-    }, TIMEOUT);
-    
-    let output = '';
-    let error = '';
-    
-    pythonProcess.stdout.on('data', (data) => {
-      output += data.toString();
-    });
-    
-    pythonProcess.stderr.on('data', (data) => {
-      error += data.toString();
-    });
-    
-    pythonProcess.on('close', (code) => {
-      clearTimeout(timeoutId); // SECURITY: Clear timeout when process completes
-      if (!responseSent) {
-        responseSent = true;
-        if (code === 0) {
-          // Extract HTML content from ```html``` code blocks or <html> tags
-          let htmlContent = '';
-          
-          // First try to extract from ```html``` code blocks
-          const codeBlockMatch = output.match(/```html\s*([\s\S]*?)\s*```/);
-          if (codeBlockMatch) {
-            htmlContent = codeBlockMatch[1].trim();
-          } else {
-            // Fallback to <html> tags
-            const htmlMatch = output.match(/<html[\s\S]*?<\/html>/i);
-            htmlContent = htmlMatch ? htmlMatch[0] : output;
-          }
-          
-          // Cache to separate 60-day file
-          const cacheFile = path.join(__dirname, '../output/critical-events-cache-60.json');
-          
-          // Preserve existing TTL if cache file exists
-          let existingTtl = 1; // default
-          if (fs.existsSync(cacheFile)) {
-            try {
-              const existingCache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-              existingTtl = existingCache.ttl_hours || 1;
-            } catch (e) {
-              // Use default if can't read existing file
-            }
-          }
-          
-          const cacheData = {
-            timestamp: new Date().toISOString(),
-            ttl_hours: existingTtl,
-            analysis: htmlContent,
-            prompt: validation.sanitized // Use sanitized prompt
-          };
-          
-          fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
-          
-          res.json({
-            success: true,
-            output: htmlContent,
-            cached: false,
-            lastRefreshed: cacheData.timestamp,
-            ttlHours: cacheData.ttl_hours
-          });
-        } else {
-          res.status(500).json({
-            success: false,
-            error: 'Agent analysis failed',
-            stderr: error
-          });
-        }
-      }
-    });
-    
-    setTimeout(() => {
-      if (!responseSent) {
-        responseSent = true;
-        pythonProcess.kill();
-        res.status(408).json({ error: 'Agent analysis timeout' });
-      }
-    }, 60000);
-    
+
+    const prompt = `Show me all critical upcoming and open events with start_time between 30 and 60 days from now. Focus on events requiring attention.`;
+    const cacheFile = path.join(__dirname, '../output/critical-events-cache-60.json');
+    spawnAnalysis(events, prompt, cacheFile, res, 'Critical AWS Health Events \u2013 30 to 60 Days');
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to start 60-day analysis' });
@@ -1376,123 +1345,32 @@ app.get('/api/critical-events-analysis-cached-pastdue', (req, res) => {
   }
 });
 
-app.post('/api/critical-events-analysis-refresh-pastdue', requireAuth, (req, res) => {
+app.post('/api/critical-events-analysis-refresh-pastdue', requireAuth, async (req, res) => {
   try {
-    const { prompt } = req.body;
-    
-    // SECURITY: Validate and sanitize input
-    const validation = validateAndSanitizePrompt(prompt);
-    if (!validation.valid) {
-      return res.status(400).json({ 
-        error: validation.error,
-        success: false 
-      });
-    }
-    
-    // LOG REQUEST for audit trail
+    const today = new Date();
+    const oneHundredTwentyDaysAgo = new Date(today);
+    oneHundredTwentyDaysAgo.setDate(today.getDate() - 120);
+
+    // Use date-only strings to avoid UTC offset issues cutting off boundary events
+    const startDate = oneHundredTwentyDaysAgo.toISOString().substring(0, 10);
+    const endDate = today.toISOString().substring(0, 10);
+
+    // Deterministic DynamoDB scan — status_code IN ('upcoming','open') + past 120 days
+    const events = await scanCriticalEvents(
+      startDate, endDate, ['upcoming', 'open']
+    );
+
     console.log({
       timestamp: new Date().toISOString(),
       endpoint: '/api/critical-events-analysis-refresh-pastdue',
       user: req.session.user?.username,
-      promptLength: validation.sanitized.length,
+      eventsFound: events.length,
       ip: req.ip
     });
-    
-    let responseSent = false;
-    
-    // Use sanitized prompt
-    const pythonProcess = spawn(PYTHON_PATH, ['test_agentic_analysis.py', validation.sanitized], {
-      cwd: path.join(__dirname, '..'),
-      env: { ...process.env, PYTHONPATH: path.join(__dirname, '..') }
-    });
-    
-    // SECURITY: Add timeout to prevent resource exhaustion
-    const TIMEOUT = 60000; // 60 seconds
-    const timeoutId = setTimeout(() => {
-      if (!responseSent) {
-        pythonProcess.kill('SIGTERM');
-        responseSent = true;
-        res.status(504).json({ error: 'Analysis timeout', success: false });
-      }
-    }, TIMEOUT);
-    
-    let output = '';
-    let error = '';
-    
-    pythonProcess.stdout.on('data', (data) => {
-      output += data.toString();
-    });
-    
-    pythonProcess.stderr.on('data', (data) => {
-      error += data.toString();
-    });
-    
-    pythonProcess.on('close', (code) => {
-      clearTimeout(timeoutId); // SECURITY: Clear timeout when process completes
-      if (!responseSent) {
-        responseSent = true;
-        if (code === 0) {
-          // Extract HTML content from ```html``` code blocks or <html> tags
-          let htmlContent = '';
-          
-          // First try to extract from ```html``` code blocks
-          const codeBlockMatch = output.match(/```html\s*([\s\S]*?)\s*```/);
-          if (codeBlockMatch) {
-            htmlContent = codeBlockMatch[1].trim();
-          } else {
-            // Fallback to <html> tags
-            const htmlMatch = output.match(/<html[\s\S]*?<\/html>/i);
-            htmlContent = htmlMatch ? htmlMatch[0] : output;
-          }
-          
-          // Cache to separate past due file
-          const cacheFile = path.join(__dirname, '../output/critical-events-pastdue.json');
-          
-          // Preserve existing TTL if cache file exists
-          let existingTtl = 1; // default
-          if (fs.existsSync(cacheFile)) {
-            try {
-              const existingCache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-              existingTtl = existingCache.ttl_hours || 1;
-            } catch (e) {
-              // Use default if can't read existing file
-            }
-          }
-          
-          const cacheData = {
-            timestamp: new Date().toISOString(),
-            ttl_hours: existingTtl,
-            analysis: htmlContent,
-            prompt: validation.sanitized // Use sanitized prompt
-          };
-          
-          fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
-          
-          res.json({
-            success: true,
-            output: htmlContent,
-            cached: false,
-            lastRefreshed: cacheData.timestamp,
-            ttlHours: cacheData.ttl_hours
-          });
-        } else {
-          res.status(500).json({
-            success: false,
-            error: 'Agent analysis failed',
-            stderr: error
-          });
-        }
-      }
-    });
-    
-    setTimeout(() => {
-      if (!responseSent) {
-        responseSent = true;
-        pythonProcess.kill();
-        res.status(408).json({ error: 'Agent analysis timeout' });
-      }
-    }, 60000);
-    
+
+    const prompt = `Show me all past due events (start_time in the past 120 days, still open or upcoming). Focus on events that are overdue.`;
+    const cacheFile = path.join(__dirname, '../output/critical-events-pastdue.json');
+    spawnAnalysis(events, prompt, cacheFile, res, 'Past Due AWS Health Events \u2013 120 Days');
   } catch (error) {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to start past due analysis' });

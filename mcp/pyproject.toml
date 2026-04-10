@@ -1,0 +1,31 @@
+[project]
+name = "chaplin-health-mcp"
+version = "0.1.0"
+description = "MCP server for querying and analyzing AWS Health Events through AI-powered natural language queries"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.3.0",
+    "boto3",
+    "strands-agents",
+]
+authors = [
+    {name = "Chitresh Saxena"},
+]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+"chaplin-health-mcp" = "chaplin_health_mcp.server:main"
+
+[tool.setuptools]
+packages = ["chaplin_health_mcp", "chaplin_health_mcp.agents"]
+
+[tool.setuptools.package-data]
+chaplin_health_mcp = ["agents/*.py"]

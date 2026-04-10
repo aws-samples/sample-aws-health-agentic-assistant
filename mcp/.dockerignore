@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.git
+node_modules
+health-dashboard/client/node_modules
+health-dashboard/client/build
+output/
+data_pipeline/
+upload/
+img/
+*.sh
+!mcp/install.sh
+!mcp/docker-healthcheck.sh

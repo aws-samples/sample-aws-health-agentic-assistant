@@ -457,12 +457,10 @@ function App() {
       setCriticalEventsAnalysis({ loading: true });
       
       const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(today.getDate() + 1);
+      const startDate = today.toISOString().split('T')[0];
       const thirtyDaysFromNow = new Date(today);
       thirtyDaysFromNow.setDate(today.getDate() + 30);
       
-      const startDate = tomorrow.toISOString().split('T')[0];
       const endDate = thirtyDaysFromNow.toISOString().split('T')[0];
       
       // First check cache
@@ -704,9 +702,7 @@ Include all past due events for this time period with complete details for each 
             onBack={goBack}
             startDate={(() => {
               const today = new Date();
-              const tomorrow = new Date(today);
-              tomorrow.setDate(today.getDate() + 1);
-              return tomorrow.toISOString().split('T')[0];
+              return today.toISOString().split('T')[0];
             })()}
             endDate={(() => {
               const today = new Date();
