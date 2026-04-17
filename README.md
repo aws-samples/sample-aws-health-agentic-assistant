@@ -76,6 +76,8 @@ Runs the MCP server locally on your machine, connecting directly to DynamoDB and
 Deploy infrastructure first, then add the MCP server to your AI assistant using the buttons/commands in step 2.
 
 ```bash
+git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
+cd sample-aws-health-agentic-assistant
 chmod +x install-infra.sh
 ./install-infra.sh
 ```
