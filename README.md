@@ -84,7 +84,7 @@ chmod +x install-infra.sh
 
 > **2) MCP only** - if infrastructure is already deployed:
 
-**<img src="https://kiro.dev/favicon.ico" width="16" height="16"> Kiro CLI:**
+**<img src="img/kiro.png" width="19" height="19" style="vertical-align: middle; margin-right: 4px;"> Kiro CLI:**
 ```bash
 kiro-cli mcp add --force --name chaplin-health --command uvx --args "chaplin-health-mcp@latest" --env AWS_PROFILE=default --env AWS_REGION=us-east-1
 ```
