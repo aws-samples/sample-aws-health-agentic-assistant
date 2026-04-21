@@ -123,7 +123,9 @@ Deploys the MCP server as a Lambda function in your AWS account. Team members co
 
 > **1) Full deployment** (infrastructure + MCP) - recommended for first time:
 
+Note: Please ensure you have Docker Desktop running before you run this command. If not, please install Docker first and ensure it is running then proceed.
 ```bash
+git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
 chmod +x deploy_chaplin.sh install-infra.sh mcp/install-mcp.sh
 ./deploy_chaplin.sh
 ```
@@ -132,6 +134,12 @@ The script automatically configures Kiro CLI (`~/.kiro/settings/mcp.json`) with 
 
 > **2) MCP only** - if infrastructure is already deployed:
 
+Clone the repository if you haven't already cloned it.
+```bash
+git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
+```
+
+Note: Please ensure you have Docker Desktop running before you run this command. If not, please install Docker first and ensure it is running then proceed.
 ```bash
 cd mcp/
 chmod +x install-mcp.sh
