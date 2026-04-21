@@ -68,7 +68,7 @@ To deploy this solution, you will need to know the `<organization-id>`, `<root-i
 #### Deployment Steps using AWS Organization
 
 1. In the Data Collection Central account, launch AWS CloudShell or open a terminal window on your local machine.
-2. Clone the repository:
+2. Clone the repository: ( Skip if already cloned )
 
     ```bash
     git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
@@ -141,7 +141,7 @@ Use this option if you do not wish to use AWS Organizations and want to target a
 #### Deployment Steps for a single account
 
 1. In the member account, launch AWS CloudShell or open a terminal window on your local machine.
-2. Clone the repository:
+2. Clone the repository: ( Skip if already cloned )
 
     ```bash
     git clone https://github.com/aws-samples/sample-aws-health-agentic-assistant.git
