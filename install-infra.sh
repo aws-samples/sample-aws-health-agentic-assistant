@@ -53,12 +53,15 @@ DYNAMODB_TABLE=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" -
   --query 'Stacks[0].Outputs[?OutputKey==`DynamoDBTableName`].OutputValue' --output text)
 LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
   --query 'Stacks[0].Outputs[?OutputKey==`S3ToDynamoDBLambdaArn`].OutputValue' --output text)
+METADATA_LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`MetadataIngestionLambdaArn`].OutputValue' --output text)
 
 print_info "DynamoDB Table: $DYNAMODB_TABLE"
 print_info "S3-to-DynamoDB Lambda: $LAMBDA_ARN"
+print_info "Metadata Ingestion Lambda: $METADATA_LAMBDA_ARN"
 
 # --- S3 event notification ---
-print_info "Configuring S3 event notification..."
+print_info "Configuring S3 event notifications..."
 
 cat > /tmp/s3-notification-config.json << EOF
 {
@@ -68,7 +71,22 @@ cat > /tmp/s3-notification-config.json << EOF
       "Events": ["s3:ObjectCreated:*"],
       "Filter": {
         "Key": {
-          "FilterRules": [{"Name": "suffix", "Value": ".json"}]
+          "FilterRules": [
+            {"Name": "prefix", "Value": "health/"},
+            {"Name": "suffix", "Value": ".json"}
+          ]
+        }
+      }
+    },
+    {
+      "LambdaFunctionArn": "$METADATA_LAMBDA_ARN",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            {"Name": "prefix", "Value": "account-metadata/"},
+            {"Name": "suffix", "Value": ".json"}
+          ]
         }
       }
     }
@@ -94,7 +112,8 @@ echo "============================================"
 print_success "Infrastructure deployment complete!"
 echo "============================================"
 echo ""
-echo "  DynamoDB Table: $DYNAMODB_TABLE"
+echo "  DynamoDB Table (health events): $DYNAMODB_TABLE"
+echo "  DynamoDB Table (account metadata): chaplin-account-metadata"
 echo "  S3 Bucket:      $S3_BUCKET_NAME"
 echo ""
 echo "  Note: Cognito is only needed for the web dashboard."

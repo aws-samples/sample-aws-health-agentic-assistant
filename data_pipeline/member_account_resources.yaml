@@ -44,6 +44,22 @@ Resources:
                   - s3:PutObject
                   - s3:PutObjectAcl
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${SupportDataManagementBucketName}/*'
+        - PolicyName: AccountMetadataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:ListAccountAliases
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - organizations:ListTagsForResource
+                Resource: '*'
 
   SupportInsightsLambdaFunction:
     Type: AWS::Lambda::Function

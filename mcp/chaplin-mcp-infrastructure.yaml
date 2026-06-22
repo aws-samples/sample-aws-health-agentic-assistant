@@ -36,7 +36,9 @@ Resources:
                   - dynamodb:Scan
                   - dynamodb:Query
                   - dynamodb:DescribeTable
-                Resource: !Sub arn:aws:dynamodb:${AwsRegion}:${AWS::AccountId}:table/chaplin-health-events*
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AwsRegion}:${AWS::AccountId}:table/chaplin-health-events*
+                  - !Sub arn:aws:dynamodb:${AwsRegion}:${AWS::AccountId}:table/chaplin-account-metadata
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel

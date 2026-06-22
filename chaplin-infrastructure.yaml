@@ -56,6 +56,8 @@ Resources:
   # DynamoDB Table
   ChaplinHealthEventsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: chaplin-health-events
       BillingMode: PAY_PER_REQUEST
@@ -87,6 +89,120 @@ Resources:
           Value: Chaplin
         - Key: Purpose
           Value: HealthEventsStorage
+
+  # Account Metadata DynamoDB Table (for blast radius prioritization)
+  ChaplinAccountMetadataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: chaplin-account-metadata
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: account_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Application
+          Value: Chaplin
+        - Key: Purpose
+          Value: AccountMetadata
+
+  # Metadata Ingestion Lambda Role
+  MetadataIngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${HealthDataBucketName}/account-metadata/*'
+        - PolicyName: DynamoDBWriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt ChaplinAccountMetadataTable.Arn
+
+  # Metadata Ingestion Lambda (triggered by S3 uploads to account-metadata/ prefix)
+  MetadataIngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: chaplin-metadata-ingestion
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt MetadataIngestionLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref ChaplinAccountMetadataTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          from decimal import Decimal
+
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          table = dynamodb.Table(os.environ['METADATA_TABLE'])
+
+          def lambda_handler(event, context):
+              for record in event['Records']:
+                  bucket = record['s3']['bucket']['name']
+                  key = record['s3']['object']['key']
+
+                  if not key.startswith('account-metadata/') or not key.endswith('.json'):
+                      continue
+
+                  raw = s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+                  data = json.loads(raw, parse_float=Decimal)
+
+                  # Support both: single account object or array of accounts
+                  accounts = data if isinstance(data, list) else data.get('accounts', [data])
+
+                  with table.batch_writer() as batch:
+                      for acct in accounts:
+                          if not acct.get('account_id'):
+                              continue
+                          acct['last_updated'] = datetime.now().isoformat()
+                          batch.put_item(Item=acct)
+
+                  print(f"Loaded {len(accounts)} account metadata records from {key}")
+              return {'statusCode': 200}
+
+  MetadataS3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MetadataIngestionFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${HealthDataBucketName}'
 
   # Lambda IAM Role
   S3ToDynamoDBLambdaRole:
@@ -291,3 +407,21 @@ Outputs:
     Value: !GetAtt S3ToDynamoDBLambdaRole.Arn
     Export:
       Name: !Sub '${AWS::StackName}-LambdaRoleArn'
+
+  AccountMetadataTableName:
+    Description: Account Metadata DynamoDB Table Name
+    Value: !Ref ChaplinAccountMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-MetadataTableName'
+
+  AccountMetadataTableArn:
+    Description: Account Metadata DynamoDB Table ARN
+    Value: !GetAtt ChaplinAccountMetadataTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MetadataTableArn'
+
+  MetadataIngestionLambdaArn:
+    Description: Metadata Ingestion Lambda Function ARN
+    Value: !GetAtt MetadataIngestionFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MetadataLambdaArn'

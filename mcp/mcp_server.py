@@ -8,7 +8,7 @@ import os
 import re
 import json
 import logging
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime, timedelta
 from collections import Counter
 from mcp.server.fastmcp import FastMCP
@@ -412,7 +412,162 @@ async def get_drill_down_details(
 
 
 # ============================================================
-# 5. CACHED PROMPTS (Suggested Prompts sidebar)
+# 5. BLAST RADIUS (tag-based impact prioritization)
+# ============================================================
+
+METADATA_TABLE_NAME = "chaplin-account-metadata"
+_metadata_table = _dynamodb.Table(METADATA_TABLE_NAME)
+
+
+def _get_all_account_metadata():
+    """Scan all account metadata records."""
+    items = []
+    resp = _metadata_table.scan()
+    items.extend(resp.get("Items", []))
+    while "LastEvaluatedKey" in resp:
+        resp = _metadata_table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return {item["account_id"]: item for item in items}
+
+
+@mcp.tool()
+async def get_estimated_blast_radius(
+    event_type: Optional[str] = None,
+    service: Optional[str] = None,
+    status: Optional[str] = None,
+    tag_filters: Any = None,
+    sort_by_tag: Optional[str] = None,
+) -> str:
+    """Estimate the blast radius of health events by joining with account metadata and resource tags. Returns impacted accounts sorted by priority (tier, spend).
+
+    Args:
+        event_type: Filter health events by event type (e.g. "AWS_LAMBDA_PLANNED_LIFECYCLE_EVENT")
+        service: Filter health events by service (e.g. "LAMBDA", "RDS", "EC2")
+        status: Filter health events by status (e.g. "open", "upcoming")
+        tag_filters: JSON string of tag key-value pairs to filter accounts. Example: {"Environment": "Production", "Tier": "Tier-1"}. Accounts must match ALL specified tags.
+        sort_by_tag: Tag key to group and sort results by (e.g. "Tier", "Division"). Defaults to sorting by monthly_spend descending.
+    """
+    # Parse tag filters
+    filters = {}
+    if tag_filters:
+        if isinstance(tag_filters, dict):
+            filters = tag_filters
+        elif isinstance(tag_filters, str):
+            try:
+                filters = json.loads(tag_filters)
+            except json.JSONDecodeError:
+                return json.dumps({"error": "tag_filters must be valid JSON"})
+        else:
+            filters = {}
+
+    # Build health event scan filters
+    scan_filters = []
+    scan_names = {}
+    scan_values = {}
+
+    if event_type:
+        scan_filters.append("event_type = :et")
+        scan_values[":et"] = event_type
+    if service:
+        scan_filters.append("#svc = :svc")
+        scan_names["#svc"] = "service"
+        scan_values[":svc"] = service
+    if status:
+        scan_filters.append("status_code = :st")
+        scan_values[":st"] = status
+
+    # Get health events
+    events = _scan_all(
+        filter_expr=" AND ".join(scan_filters) if scan_filters else None,
+        expr_names=scan_names if scan_names else None,
+        expr_values=scan_values if scan_values else None,
+    )
+
+    if not events:
+        return json.dumps({"message": "No health events found matching the criteria."})
+
+    # Get account metadata
+    metadata = _get_all_account_metadata()
+
+    # Filter accounts by tags
+    if filters:
+        metadata = {
+            acct_id: meta for acct_id, meta in metadata.items()
+            if all(meta.get("tags", {}).get(k) == v for k, v in filters.items())
+        }
+
+    # Group events by account
+    from collections import defaultdict
+    account_events = defaultdict(list)
+    for e in events:
+        acct_id = e.get("account") or e.get("account_id") or ""
+        if not filters or acct_id in metadata:
+            account_events[acct_id].append(e)
+
+    if not account_events:
+        return json.dumps({"message": "No impacted accounts match the specified tag filters."})
+
+    # Build blast radius results
+    results = []
+    for acct_id, acct_events in account_events.items():
+        meta = metadata.get(acct_id, {})
+        tags = meta.get("tags", {})
+        spend = meta.get("monthly_spend", 0)
+
+        # Get unique services and event types affected
+        services = set(e.get("service", "") for e in acct_events)
+        event_types = set(e.get("event_type", "") for e in acct_events)
+
+        # Find earliest deadline
+        deadlines = [e.get("start_time", "") for e in acct_events if e.get("start_time")]
+        earliest_deadline = min(deadlines) if deadlines else "N/A"
+
+        results.append({
+            "account_id": acct_id,
+            "account_name": meta.get("account_name", "N/A"),
+            "tags": tags,
+            "monthly_spend": float(spend),
+            "event_count": len(acct_events),
+            "services_affected": sorted(services),
+            "event_types": sorted(event_types),
+            "earliest_deadline": earliest_deadline[:10] if earliest_deadline != "N/A" else "N/A",
+        })
+
+    # Sort results
+    tier_order = {"Tier-1": 0, "Tier-2": 1, "Tier-3": 2}
+    if sort_by_tag:
+        results.sort(key=lambda r: (r["tags"].get(sort_by_tag, "zzz"), -r["monthly_spend"]))
+    else:
+        results.sort(key=lambda r: (tier_order.get(r["tags"].get("Tier"), 99), -r["monthly_spend"]))
+
+    # Summary stats
+    total_spend = sum(r["monthly_spend"] for r in results)
+    tier1_spend = sum(r["monthly_spend"] for r in results if r["tags"].get("Tier") == "Tier-1")
+    total_events = sum(r["event_count"] for r in results)
+
+    return json.dumps({
+        "current_date": datetime.now().astimezone().strftime("%Y-%m-%d %Z"),
+        "note": "Compare earliest_deadline against current_date to determine if events are past due or upcoming.",
+        "blast_radius_summary": {
+            "total_accounts_impacted": len(results),
+            "total_events": total_events,
+            "total_monthly_spend_at_risk": total_spend,
+            "tier1_spend_at_risk": tier1_spend,
+            "tier1_spend_percentage": round(tier1_spend / total_spend * 100, 1) if total_spend else 0,
+        },
+        "filters_applied": {
+            "event_type": event_type,
+            "service": service,
+            "status": status,
+            "tag_filters": filters or None,
+            "sort_by_tag": sort_by_tag,
+        },
+        "impacted_accounts": results,
+    }, indent=2, default=str)
+
+
+# ============================================================
+# 6. CACHED PROMPTS (Suggested Prompts sidebar)
 # ============================================================
 
 @mcp.tool()
@@ -431,7 +586,7 @@ async def get_cached_prompts() -> str:
 
 
 # ============================================================
-# 6. CRITICAL EVENTS (30d, 30-60d, Past Due — AI agent powered)
+# 7. CRITICAL EVENTS (30d, 30-60d, Past Due — AI agent powered)
 # ============================================================
 
 def _run_agent(prompt: str) -> str:

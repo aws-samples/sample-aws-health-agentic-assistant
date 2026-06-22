@@ -30,6 +30,12 @@ def upload_health_on_scheduler_run(event, account_id):
             bucket_name, past_no_of_days, account_id
         )
         response_messages.append("Health events uploaded successfully.")
+
+        # Collect and upload account metadata (tags + cost)
+        upload_metadata = importlib.import_module("upload_account_metadata")
+        response_messages.append("Collecting account metadata...")
+        upload_metadata.upload_account_metadata_to_s3(bucket_name, account_id)
+        response_messages.append("Account metadata uploaded successfully.")
         
         return {"statusCode": 200, "body": "\n".join(response_messages)}
         
